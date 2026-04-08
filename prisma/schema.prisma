@@ -1,0 +1,81 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id                String   @id @default(uuid())
+  name              String
+  email             String   @unique
+  phone             String
+  createdAt         DateTime @default(now())
+
+  wallet            Wallet?
+}
+
+model Wallet {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  balance   Decimal  @default(0)
+  currency  String   @default("USD")
+
+  user      User     @relation(fields: [userId], references: [id])
+  sentTransactions     Transaction[] @relation("sent")
+  receivedTransactions Transaction[] @relation("received")
+}
+
+model Transaction {
+  id              String   @id @default(uuid())
+  reference       String   @unique // 🔥 idempotency key
+  type            TransactionType
+  amount          Decimal
+  status          TransactionStatus
+  provider        Provider?
+  
+  senderWalletId   String?
+  receiverWalletId String?
+
+  senderWallet     Wallet? @relation("sent", fields: [senderWalletId], references: [id])
+  receiverWallet   Wallet? @relation("received", fields: [receiverWalletId], references: [id])
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  paymentLog      PaymentLog?
+}
+
+model PaymentLog {
+  id            String   @id @default(uuid())
+  transactionId String   @unique
+  provider      Provider
+  payload       Json
+  status        TransactionStatus
+
+  transaction   Transaction @relation(fields: [transactionId], references: [id])
+}
+
+enum TransactionType {
+  DEPOSIT
+  TRANSFER
+  WITHDRAW
+}
+
+enum TransactionStatus {
+  PENDING
+  SUCCESS
+  FAILED
+}
+
+enum Provider {
+  STRIPE
+  PAYPAL
+}
