@@ -1,10 +1,73 @@
 import { Module } from '@nestjs/common';
-import { AppController } from './app.controller';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
+import { ConfigModule } from '@nestjs/config';
+import { ScheduleModule } from '@nestjs/schedule';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { PrismaModule } from './prisma/prisma.module';
+import { AppController } from './app.controller';
+import { AuthModule } from './modules/auth/auth.module';
+import { JwtAuthGuard, RolesGuard } from './common/guards';
+import configuration from './config/configuration';
+import { configValidationSchema } from './config';
+import {
+  RequestContextInterceptor,
+  ResponseInterceptor,
+} from './common/interceptors';
+import { RedisModule } from './modules/redis/redis.module';
+import { HealthModule } from './modules/health/health.module';
+import { HealthService } from './modules/health/health.service';
+import { CryptoModule } from './modules/crypto/crypto.module';
 
 @Module({
-  imports: [PrismaModule],
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      load: [configuration],
+      validationSchema: configValidationSchema,
+      validationOptions: {
+        allowUnknown: true,
+        abortEarly: true,
+      },
+    }),
+    ScheduleModule.forRoot(),
+    // Global rate limiter — auth routes override with tighter limits
+    ThrottlerModule.forRoot([
+      {
+        name: 'global',
+        ttl: 60_000, // 1 minute window
+        limit: 120, // 120 req/min for general routes
+      },
+    ]),
+    PrismaModule,
+    AuthModule,
+    RedisModule,
+    HealthModule,
+    CryptoModule,
+    // Feature modules are registered here as they are implemented
+  ],
   controllers: [AppController],
-  providers: [],
+  providers: [
+    {
+      provide: APP_GUARD,
+      useClass: ThrottlerGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: JwtAuthGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: RolesGuard,
+    },
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: RequestContextInterceptor,
+    },
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: ResponseInterceptor,
+    },
+    HealthService,
+  ],
 })
 export class AppModule {}

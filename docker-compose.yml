@@ -1,14 +1,42 @@
 services:
   payment-system-db:
-    image: postgres:18
+    image: postgres:16
     ports:
-      - 5434:5432
+      - '5434:5432'
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: 123
+      POSTGRES_PASSWORD: '123'
       POSTGRES_DB: nest
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d nest']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
     networks:
-      - unknown
+      - payment-network
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  payment-system-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - '3000:3000'
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://postgres:123@payment-system-db:5432/nest?schema=public
+    depends_on:
+      payment-system-db:
+        condition: service_healthy
+    networks:
+      - payment-network
+    command: sh -c "npx prisma migrate deploy && node dist/main"
 
 networks:
-  unknown:
+  payment-network:
+
+volumes:
+  postgres-data:

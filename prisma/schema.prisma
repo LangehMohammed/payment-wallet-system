@@ -1,81 +1,172 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
-  provider = "prisma-client"
-  output   = "../generated/prisma"
+  provider = "prisma-client-js"
 }
 
 datasource db {
   provider = "postgresql"
 }
 
-model User {
-  id                String   @id @default(uuid())
-  name              String
-  email             String   @unique
-  phone             String
-  createdAt         DateTime @default(now())
+// ─── Enums ────────────────────────────────────────────────────────────────────
 
-  wallet            Wallet?
+enum Role {
+  USER
+  ADMIN
 }
 
-model Wallet {
-  id        String   @id @default(uuid())
-  userId    String   @unique
-  balance   Decimal  @default(0)
-  currency  String   @default("USD")
-
-  user      User     @relation(fields: [userId], references: [id])
-  sentTransactions     Transaction[] @relation("sent")
-  receivedTransactions Transaction[] @relation("received")
+enum AccountStatus {
+  ACTIVE
+  FROZEN
+  SUSPENDED
+  CLOSED
 }
 
-model Transaction {
-  id              String   @id @default(uuid())
-  reference       String   @unique // 🔥 idempotency key
-  type            TransactionType
-  amount          Decimal
-  status          TransactionStatus
-  provider        Provider?
-  
-  senderWalletId   String?
-  receiverWalletId String?
-
-  senderWallet     Wallet? @relation("sent", fields: [senderWalletId], references: [id])
-  receiverWallet   Wallet? @relation("received", fields: [receiverWalletId], references: [id])
-
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-
-  paymentLog      PaymentLog?
-}
-
-model PaymentLog {
-  id            String   @id @default(uuid())
-  transactionId String   @unique
-  provider      Provider
-  payload       Json
-  status        TransactionStatus
-
-  transaction   Transaction @relation(fields: [transactionId], references: [id])
+enum Currency {
+  USD
+  EUR
+  GBP
 }
 
 enum TransactionType {
   DEPOSIT
+  WITHDRAWAL
   TRANSFER
-  WITHDRAW
 }
 
 enum TransactionStatus {
-  PENDING
-  SUCCESS
+  INITIATED
+  AUTHORIZED
+  PROCESSING
+  SETTLED
   FAILED
+  REVERSED
+}
+
+enum EntryDirection {
+  CREDIT
+  DEBIT
 }
 
 enum Provider {
   STRIPE
   PAYPAL
+  INTERNAL
+}
+
+// ─── Models ───────────────────────────────────────────────────────────────────
+
+model User {
+  id        String        @id @default(uuid())
+  name      String
+  email     String        @unique
+  phone     String        @unique
+  password  String
+  role      Role          @default(USER)
+  status    AccountStatus @default(ACTIVE)
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  wallet        Wallet?
+  refreshTokens RefreshToken[]
+}
+
+model RefreshToken {
+  id         String    @id @default(uuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash  String    @unique
+  createdAt  DateTime  @default(now())
+  expiresAt  DateTime
+  revokedAt  DateTime?
+
+  @@index([userId, revokedAt, expiresAt, createdAt])
+  @@index([expiresAt])
+}
+
+model Wallet {
+  id     String        @id @default(uuid())
+  userId String        @unique
+  user   User          @relation(fields: [userId], references: [id])
+
+  currency Currency      @default(USD)
+  status   AccountStatus @default(ACTIVE)
+
+  availableBalance Decimal @default(0) @db.Decimal(18, 4) // spendable now
+  lockedBalance    Decimal @default(0) @db.Decimal(18, 4) // held for pending withdrawal
+  pendingBalance   Decimal @default(0) @db.Decimal(18, 4) // incoming deposit not yet settled
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  ledgerEntries        LedgerEntry[]
+  sentTransactions     Transaction[] @relation("SenderWallet")
+  receivedTransactions Transaction[] @relation("ReceiverWallet")
+}
+
+model Transaction {
+  id             String            @id @default(uuid())
+  idempotencyKey String            @unique
+  type           TransactionType
+  status         TransactionStatus @default(INITIATED)
+  amount         Decimal           @db.Decimal(18, 4)
+  currency       Currency          @default(USD)
+  description    String?
+
+  senderWalletId   String?
+  senderWallet     Wallet? @relation("SenderWallet", fields: [senderWalletId], references: [id])
+  receiverWalletId String?
+  receiverWallet   Wallet? @relation("ReceiverWallet", fields: [receiverWalletId], references: [id])
+
+  provider    Provider?
+  providerRef String?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  settledAt DateTime?
+
+  ledgerEntries LedgerEntry[]
+  paymentLog    PaymentLog?
+  outboxEvents  OutboxEvent[]
+}
+
+model LedgerEntry {
+  id            String         @id @default(uuid())
+  walletId      String
+  wallet        Wallet         @relation(fields: [walletId], references: [id])
+  transactionId String
+  transaction   Transaction    @relation(fields: [transactionId], references: [id])
+  direction     EntryDirection
+  amount        Decimal        @db.Decimal(18, 4)
+  currency      Currency       @default(USD)
+  balanceAfter  Decimal        @db.Decimal(18, 4)
+  createdAt     DateTime       @default(now())
+
+  @@index([walletId, createdAt])
+  @@index([transactionId])
+}
+
+model PaymentLog {
+  id            String            @id @default(uuid())
+  transactionId String            @unique
+  transaction   Transaction       @relation(fields: [transactionId], references: [id])
+  provider      Provider
+  providerRef   String?
+  payload       Json
+  status        TransactionStatus
+  createdAt     DateTime          @default(now())
+}
+
+model OutboxEvent {
+  id            String      @id @default(uuid())
+  transactionId String
+  transaction   Transaction @relation(fields: [transactionId], references: [id])
+  eventType     String
+  payload       Json
+  deliveredAt   DateTime?
+  retryCount    Int         @default(0)
+  createdAt     DateTime    @default(now())
+
+  @@index([deliveredAt, retryCount])
 }

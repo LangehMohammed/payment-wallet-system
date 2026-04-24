@@ -3,6 +3,10 @@
 /node_modules
 /build
 
+# Claude
+/.claude
+CLAUDE.md
+
 # Logs
 logs
 *.log
@@ -38,6 +42,7 @@ lerna-debug.log*
 # dotenv environment variable files
 .env
 .env.development.local
+.env.example
 .env.test.local
 .env.production.local
 .env.local
