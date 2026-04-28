@@ -15,9 +15,9 @@ import {
 } from './common/interceptors';
 import { RedisModule } from './modules/redis/redis.module';
 import { HealthModule } from './modules/health/health.module';
-import { HealthService } from './modules/health/health.service';
 import { CryptoModule } from './modules/crypto/crypto.module';
 import { UsersModule } from './modules/user/users.module';
+import { WalletModule } from './modules/wallet/wallet.module';
 
 @Module({
   imports: [
@@ -45,6 +45,7 @@ import { UsersModule } from './modules/user/users.module';
     HealthModule,
     CryptoModule,
     UsersModule,
+    WalletModule,
     // Feature modules are registered here as they are implemented
   ],
   controllers: [AppController],
@@ -69,7 +70,6 @@ import { UsersModule } from './modules/user/users.module';
       provide: APP_INTERCEPTOR,
       useClass: ResponseInterceptor,
     },
-    HealthService,
   ],
 })
 export class AppModule {}
