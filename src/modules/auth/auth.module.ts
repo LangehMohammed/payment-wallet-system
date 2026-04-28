@@ -39,5 +39,6 @@ import { SessionService } from './session.service';
     SessionService,
   ],
   controllers: [AuthController],
+  exports: [TokenService, TokenDenylistService],
 })
 export class AuthModule {}

@@ -17,6 +17,7 @@ import { RedisModule } from './modules/redis/redis.module';
 import { HealthModule } from './modules/health/health.module';
 import { HealthService } from './modules/health/health.service';
 import { CryptoModule } from './modules/crypto/crypto.module';
+import { UsersModule } from './modules/user/users.module';
 
 @Module({
   imports: [
@@ -43,6 +44,7 @@ import { CryptoModule } from './modules/crypto/crypto.module';
     RedisModule,
     HealthModule,
     CryptoModule,
+    UsersModule,
     // Feature modules are registered here as they are implemented
   ],
   controllers: [AppController],

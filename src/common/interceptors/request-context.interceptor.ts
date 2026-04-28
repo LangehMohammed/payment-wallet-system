@@ -20,7 +20,7 @@ export class RequestContextInterceptor implements NestInterceptor {
     const contextData: RequestContext = {
       requestId: request.headers['x-request-id'] || uuidv4(),
       // Handle proxy IPs (X-Forwarded-For) if behind a load balancer
-      ip: request.headers['x-forwarded-for']?.split(',')[0] || request.ip,
+      ip: request.ip,
       userAgent: request.headers['user-agent'],
       userId: request.user?.sub,
     };

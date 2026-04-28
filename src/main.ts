@@ -14,6 +14,8 @@ async function bootstrap() {
   // Security
   app.use(helmet());
 
+  app.getHttpAdapter().getInstance().set('trust proxy', 1);
+
   const allowedOrigins = configService.get<string[]>('app.allowedOrigins');
 
   // Guard — should never reach here due to Joi validation, but defense-in-depth

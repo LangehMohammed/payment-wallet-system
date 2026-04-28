@@ -19,6 +19,14 @@ export const AuditEvent = {
   LOGOUT_IDENTITY_MISMATCH: 'LOGOUT_IDENTITY_MISMATCH',
   SESSION_HIJACKING_ATTEMPT: 'SESSION_HIJACKING_ATTEMPT',
 
+  // User - self-service profile and account lifecycle
+  USER_PROFILE_UPDATED: 'USER_PROFILE_UPDATED',
+  USER_PASSWORD_CHANGED: 'USER_PASSWORD_CHANGED',
+  USER_ACCOUNT_CLOSED: 'USER_ACCOUNT_CLOSED',
+
+  // Admin - privilaged mutations on user accounts
+  ADMIN_USER_STATUS_UPDATED: 'ADMIN_USER_STATUS_UPDATED',
+
   // Infrastructure — internal system/control failures
   DENYLIST_FAILURE: 'DENYLIST_FAILURE',
 } as const;
