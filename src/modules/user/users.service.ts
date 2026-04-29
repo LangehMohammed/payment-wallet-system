@@ -58,19 +58,12 @@ export class UsersService {
       );
     }
 
-    if (dto.phone) {
-      const existing = await this.usersRepository.checkPhoneTaken(dto.phone);
-      if (existing) {
-        throw new ConflictException('Phone number already in use');
-      }
-    }
-
     const updated = await this.usersRepository.updateProfile(userId, {
       ...(dto.name && { name: dto.name }),
-      ...(dto.phone && { phone: dto.phone }),
+      ...(dto.phone && { phone: dto.phone.trim() }),
     });
 
-    this.audit.log('USER_PROFILE_UPDATED', { userId });
+    void this.audit.log('USER_PROFILE_UPDATED', { userId });
     return updated;
   }
 
@@ -112,7 +105,7 @@ export class UsersService {
     const ttl = this.tokenService.getAccessTokenTtlSeconds();
     await this.tokenDenylistService.revoke(jti, ttl);
 
-    this.audit.log('USER_PASSWORD_CHANGED', { userId });
+    void this.audit.log('USER_PASSWORD_CHANGED', { userId });
   }
 
   async closeAccount(userId: string, jti: string): Promise<void> {
@@ -126,7 +119,7 @@ export class UsersService {
     const ttl = this.tokenService.getAccessTokenTtlSeconds();
     await this.tokenDenylistService.revoke(jti, ttl);
 
-    this.audit.log('USER_ACCOUNT_CLOSED', { userId });
+    void this.audit.log('USER_ACCOUNT_CLOSED', { userId });
   }
 
   // ── Admin-facing ───────────────────────────────────────────────────────────
@@ -179,7 +172,7 @@ export class UsersService {
     if (dto.status === AccountStatus.CLOSED) {
       await this.usersRepository.closeAccount(targetId);
 
-      this.audit.warn('ADMIN_USER_STATUS_UPDATED', {
+      void this.audit.warn('ADMIN_USER_STATUS_UPDATED', {
         userId: requesterId,
         meta: { targetId, status: dto.status, role: dto.role },
       });
@@ -195,7 +188,7 @@ export class UsersService {
       role: dto.role,
     });
 
-    this.audit.warn('ADMIN_USER_STATUS_UPDATED', {
+    void this.audit.warn('ADMIN_USER_STATUS_UPDATED', {
       userId: requesterId,
       meta: { targetId, status: dto.status, role: dto.role },
     });

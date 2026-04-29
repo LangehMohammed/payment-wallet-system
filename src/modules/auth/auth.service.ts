@@ -37,18 +37,6 @@ export class AuthService {
    * - Persists the refresh token in the session store with user agent info.
    */
   async register(dto: RegisterDto, userAgent?: string) {
-    const existing = await this.authRepository.checkEmailOrPhoneTaken(
-      dto.email,
-      dto.phone,
-    );
-    if (existing) {
-      if (existing.email === dto.email) {
-        throw new ConflictException('Email already in use');
-      } else {
-        throw new ConflictException('Phone number already in use');
-      }
-    }
-
     const hashed = await argon2.hash(dto.password, {
       type: argon2.argon2id,
       memoryCost: 64 * 1024,
@@ -59,7 +47,7 @@ export class AuthService {
     const user = await this.authRepository.createUserWithWallet({
       name: dto.name,
       email: dto.email,
-      phone: dto.phone,
+      phone: dto.phone.trim(),
       password: hashed,
     });
 
@@ -75,7 +63,7 @@ export class AuthService {
       userAgent,
     );
 
-    this.audit.log('USER_REGISTERED', { userId: user.id, userAgent });
+    void this.audit.log('USER_REGISTERED', { userId: user.id, userAgent });
     return tokens;
   }
 
@@ -99,7 +87,7 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
 
     if (user.status !== AccountStatus.ACTIVE) {
-      this.audit.warn('LOGIN_BLOCKED_ACCOUNT', { userId: user.id });
+      void this.audit.warn('LOGIN_BLOCKED_ACCOUNT', { userId: user.id });
       throw new UnauthorizedException(
         'Account is not active. Please contact support.',
       );
@@ -117,7 +105,7 @@ export class AuthService {
       userAgent,
     );
 
-    this.audit.log('USER_LOGIN', { userId: user.id, userAgent });
+    void this.audit.log('USER_LOGIN', { userId: user.id, userAgent });
     return tokens;
   }
 
@@ -141,7 +129,7 @@ export class AuthService {
     if (session.status === 'REUSE_DETECTED') {
       await this.sessionService.revokeAllTokens(session.token.userId);
       await this.sessionService.clearRotationCache(hash);
-      this.audit.warn('TOKEN_REUSE_DETECTED', {
+      void this.audit.warn('TOKEN_REUSE_DETECTED', {
         userId: session.token.userId,
         userAgent,
       });
@@ -153,7 +141,7 @@ export class AuthService {
     if (session.status === 'GRACE_PERIOD') {
       const cached = await this.sessionService.getRotationCache(hash);
       if (cached) {
-        this.audit.log('GRACE_PERIOD_REPLAYED', {
+        void this.audit.log('GRACE_PERIOD_REPLAYED', {
           userId: session.token.userId,
           userAgent,
         });
@@ -161,7 +149,7 @@ export class AuthService {
       }
 
       await this.sessionService.clearRotationCache(hash);
-      this.audit.warn('GRACE_PERIOD_CACHE_MISS', {
+      void this.audit.warn('GRACE_PERIOD_CACHE_MISS', {
         userId: session.token.userId,
         userAgent,
       });
@@ -172,7 +160,7 @@ export class AuthService {
     if (!user) throw new UnauthorizedException();
 
     if (user.status !== AccountStatus.ACTIVE) {
-      this.audit.warn('LOGIN_BLOCKED_ACCOUNT', { userId: user.id });
+      void this.audit.warn('LOGIN_BLOCKED_ACCOUNT', { userId: user.id });
       throw new UnauthorizedException(
         'Account is not active. Please contact support.',
       );
@@ -197,7 +185,7 @@ export class AuthService {
       tokens,
     );
 
-    this.audit.log('TOKEN_REFRESHED', { userId: user.id, userAgent });
+    void this.audit.log('TOKEN_REFRESHED', { userId: user.id, userAgent });
     return tokens;
   }
 
@@ -221,7 +209,7 @@ export class AuthService {
 
     if (result.status === 'REUSE_DETECTED') {
       await this.sessionService.revokeAllTokens(result.token.userId);
-      this.audit.error('TOKEN_REUSE_DETECTED', {
+      void this.audit.error('TOKEN_REUSE_DETECTED', {
         userId: result.token.userId,
         userAgent,
       });
@@ -229,7 +217,7 @@ export class AuthService {
     }
 
     if (result.token.userId !== userId) {
-      this.audit.warn('LOGOUT_IDENTITY_MISMATCH', { userId });
+      void this.audit.warn('LOGOUT_IDENTITY_MISMATCH', { userId });
       throw new UnauthorizedException('Identity Mismatch');
     }
 
@@ -241,7 +229,7 @@ export class AuthService {
       await this.sessionService.revokeToken(hash);
     }
 
-    this.audit.log('LOGOUT', { userId });
+    void this.audit.log('LOGOUT', { userId });
   }
 
   /**
@@ -251,7 +239,7 @@ export class AuthService {
    */
   async logoutAll(userId: string) {
     await this.sessionService.revokeAllTokens(userId);
-    this.audit.log('LOGOUT_ALL', { userId });
+    void this.audit.log('LOGOUT_ALL', { userId });
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────

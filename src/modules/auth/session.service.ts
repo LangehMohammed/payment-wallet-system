@@ -61,7 +61,7 @@ export class SessionService {
     );
 
     if (evictedSessionId) {
-      this.audit.warn('SESSION_EVICTED', {
+      void this.audit.warn('SESSION_EVICTED', {
         userId,
         userAgent,
         meta: { evictedSessionId },
@@ -97,14 +97,14 @@ export class SessionService {
     const ttl = this.tokenService.getAccessTokenTtlSeconds();
     await this.tokenDenylistService.revoke(jti, ttl);
   }
- 
+
   /**
    * Revokes a single refresh token by hash.
    */
   async revokeToken(hash: string): Promise<void> {
     await this.authRepository.revokeRefreshToken(hash);
   }
- 
+
   /**
    * Revokes all active refresh tokens for a user.
    * Used on TOKEN_REUSE_DETECTED and logoutAll.

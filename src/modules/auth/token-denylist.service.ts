@@ -29,7 +29,7 @@ export class TokenDenylistService {
         error,
       });
 
-      this.audit.error('DENYLIST_FAILURE', {
+      void this.audit.error('DENYLIST_FAILURE', {
         meta: { operation: 'revoke', jti },
       });
       throw error;
@@ -50,7 +50,7 @@ export class TokenDenylistService {
         jti,
         error,
       });
-      this.audit.error('DENYLIST_FAILURE', {
+      void this.audit.error('DENYLIST_FAILURE', {
         meta: { operation: 'isRevoked', jti },
       });
       throw new ServiceUnavailableException(
