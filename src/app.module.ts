@@ -18,6 +18,7 @@ import { HealthModule } from './modules/health/health.module';
 import { CryptoModule } from './modules/crypto/crypto.module';
 import { UsersModule } from './modules/user/users.module';
 import { WalletModule } from './modules/wallet/wallet.module';
+import { TransactionModule } from './modules/transaction/transaction.module';
 
 @Module({
   imports: [
@@ -46,6 +47,7 @@ import { WalletModule } from './modules/wallet/wallet.module';
     CryptoModule,
     UsersModule,
     WalletModule,
+    TransactionModule,
     // Feature modules are registered here as they are implemented
   ],
   controllers: [AppController],
