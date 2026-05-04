@@ -17,29 +17,41 @@ export class TokenDenylistService {
   ) {}
 
   /**
-   * Revokes a token by adding its JTI to the denylist with an expiration time.
-   * - Stores the JTI in Redis with a value of '1' and sets an expiration based on the token's remaining lifespan.
+   * Adds a JTI to the denylist with a TTL matching the token's remaining lifespan.
+   *
+   * Failure policy — SOFT FAIL:
+   *   Redis unavailability must NOT block logout or password-change. The refresh
+   *   token is already revoked in the database; the denylist only closes the
+   *   narrow window where a short-lived access token could still be used.
+   *   We log + audit the failure so operators are alerted, but we never throw.
+   *
+   *   Contrast with isRevoked(), which HARD FAILS (throws) — an unreadable
+   *   denylist means we cannot confirm a token is safe, so we deny the request.
+   *   The asymmetry is intentional: revocation failure is recoverable (token
+   *   expires naturally), authentication failure is not.
    */
   async revoke(jti: string, expiresIn: number): Promise<void> {
     try {
       await this.redis.set(`denylist:${jti}`, '1', 'EX', expiresIn);
     } catch (error) {
-      this.logger.error('Redis denylist write failed — JTI not denylisted', {
-        jti,
-        error,
-      });
-
+      this.logger.error(
+        'Redis denylist write failed — JTI not denylisted. ' +
+          'Token will expire naturally. Operator action required.',
+        { jti, error },
+      );
       void this.audit.error('DENYLIST_FAILURE', {
         meta: { operation: 'revoke', jti },
       });
-      throw error;
     }
   }
 
   /**
-   * Checks if a token's JTI is present in the denylist, indicating it has been revoked.
-   * - Queries Redis for the presence of the JTI key and returns true if found, false otherwise.
-   * - Implements a fail-closed approach by treating any Redis errors as an indication that the token should be considered revoked.
+   * Returns true if the JTI is present in the denylist (token was revoked).
+   *
+   * Failure policy — HARD FAIL (fail-closed):
+   *   If Redis is unreachable we cannot determine whether a token is revoked.
+   *   Allowing the request would risk accepting a token that was explicitly
+   *   invalidated, so we throw ServiceUnavailableException.
    */
   async isRevoked(jti: string): Promise<boolean> {
     try {

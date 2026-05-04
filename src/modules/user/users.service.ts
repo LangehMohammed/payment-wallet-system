@@ -10,6 +10,7 @@ import * as argon2 from 'argon2';
 import { AuditLogger } from '@app/common/audit/audit-logger.service';
 import { TokenDenylistService } from '../auth/token-denylist.service';
 import { TokenService } from '../auth/token.service';
+import { AUTH_CONSTANTS } from '../auth/auth.constants';
 import {
   UsersRepository,
   UserProfile,
@@ -93,12 +94,9 @@ export class UsersService {
       );
     }
 
-    const hashed = await argon2.hash(dto.newPassword, {
-      type: argon2.argon2id,
-      memoryCost: 64 * 1024,
-      timeCost: 3,
-      parallelism: 4,
-    });
+    // Uses AUTH_CONSTANTS.ARGON2_OPTIONS — same parameters as register() and
+    // the DUMMY_HASH pre-computation. A mismatch would reintroduce timing deltas.
+    const hashed = await argon2.hash(dto.newPassword, AUTH_CONSTANTS.ARGON2_OPTIONS);
 
     await this.usersRepository.updatePasswordAndRevokeSessions(userId, hashed);
 
@@ -114,8 +112,6 @@ export class UsersService {
 
     await this.usersRepository.closeAccount(userId);
 
-    // Denylist the current access token — it is still valid until expiry
-    // otherwise. Short-lived (5m default) but we close the window entirely.
     const ttl = this.tokenService.getAccessTokenTtlSeconds();
     await this.tokenDenylistService.revoke(jti, ttl);
 
@@ -132,13 +128,7 @@ export class UsersService {
       { page, limit },
     );
 
-    return {
-      users,
-      total,
-      page,
-      limit,
-      totalPages: Math.ceil(total / limit),
-    };
+    return { users, total, page, limit, totalPages: Math.ceil(total / limit) };
   }
 
   async getUserById(id: string): Promise<UserWithWallet> {
@@ -151,49 +141,45 @@ export class UsersService {
     requesterId: string,
     targetId: string,
     dto: AdminUpdateUserDto,
-  ): Promise<UserProfile> {
+  ): Promise<UserWithWallet> {
     if (!dto.status && !dto.role) {
       throw new BadRequestException(
         'At least one field (status or role) must be provided',
       );
     }
 
-    // Prevent an admin from modifying their own status or role via the admin
-    // endpoint — self-mutations must go through the user-facing endpoints.
     if (requesterId === targetId) {
       throw new ForbiddenException(
         'Administrators cannot modify their own account via this endpoint',
       );
     }
 
+    // Single existence check — no pre-read before the write.
+    // closeAccount and updateStatusOrRole each throw NotFoundException
+    // internally if the target disappears between here and the write.
     const target = await this.usersRepository.findById(targetId);
     if (!target) throw new NotFoundException('User not found');
 
     if (dto.status === AccountStatus.CLOSED) {
+      // closeAccount is atomic: re-reads balances inside its transaction,
+      // rejects if any funds remain, then sets CLOSED + revokes tokens.
       await this.usersRepository.closeAccount(targetId);
-
-      void this.audit.warn('ADMIN_USER_STATUS_UPDATED', {
-        userId: requesterId,
-        meta: { targetId, status: dto.status, role: dto.role },
+    } else {
+      await this.usersRepository.updateStatusOrRole(targetId, {
+        status: dto.status,
+        role: dto.role,
       });
-
-      // closeAccount already sets status to CLOSED — fetch and return the
-      // updated profile rather than calling updateStatusOrRole redundantly.
-      const updated = await this.usersRepository.findById(targetId);
-      return updated as UserProfile;
     }
-
-    await this.usersRepository.updateStatusOrRole(targetId, {
-      status: dto.status,
-      role: dto.role,
-    });
 
     void this.audit.warn('ADMIN_USER_STATUS_UPDATED', {
       userId: requesterId,
       meta: { targetId, status: dto.status, role: dto.role },
     });
 
+    // Single post-write read — returns the committed state.
     const updated = await this.usersRepository.findById(targetId);
-    return updated;
+    // updated cannot be null here: closeAccount/updateStatusOrRole would have
+    // thrown if the record disappeared, and CLOSED status is a valid state.
+    return updated!;
   }
 }

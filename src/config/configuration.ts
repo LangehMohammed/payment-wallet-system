@@ -7,6 +7,10 @@ export default () => ({
   database: {
     url: process.env.DATABASE_URL,
     poolSize: parseInt(process.env.DATABASE_POOL_SIZE, 10) || 10,
+    slowQueryThresholdMs: parseInt(
+      process.env.SLOW_QUERY_THRESHOLD_MS,
+      10,
+    ) || 100,
   },
   jwt: {
     accessSecret: process.env.JWT_ACCESS_SECRET,
@@ -25,5 +29,10 @@ export default () => ({
   redis: {
     host: process.env.REDIS_HOST ?? 'localhost',
     port: parseInt(process.env.REDIS_PORT, 10) || 6379,
+    password: process.env.REDIS_PASSWORD,
+  },
+  swagger: {
+    user: process.env.SWAGGER_USER,
+    password: process.env.SWAGGER_PASSWORD,
   },
 });

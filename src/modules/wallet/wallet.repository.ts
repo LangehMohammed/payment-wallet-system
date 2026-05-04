@@ -66,6 +66,22 @@ export interface WalletFilters {
   currency?: Currency;
 }
 
+/**
+ * Raw row shape returned by postgres for the FOR UPDATE query.
+ * pg driver returns NUMERIC/DECIMAL columns as strings — never as JS numbers
+ * or Prisma.Decimal instances. All Decimal fields are typed as `string` here
+ * and coerced explicitly in `lockWallet` before being returned as WalletSnapshot.
+ */
+interface WalletLockRow {
+  id: string;
+  userId: string;
+  currency: Currency;
+  status: AccountStatus;
+  availableBalance: string;
+  lockedBalance: string;
+  pendingBalance: string;
+}
+
 export interface WalletSnapshot {
   id: string;
   userId: string;
@@ -82,9 +98,6 @@ export class WalletRepository {
 
   // ── Wallet reads ───────────────────────────────────────────────────────────
 
-  /**
-   * Fetch a wallet by the owning user's ID.
-   */
   async findByUserId(userId: string): Promise<WalletRecord | null> {
     return this.prisma.wallet.findUnique({
       where: { userId },
@@ -92,10 +105,6 @@ export class WalletRepository {
     });
   }
 
-  /**
-   * Fetch a wallet by its own ID — used by admin endpoints.
-   * Returns null when the wallet does not exist.
-   */
   async findById(id: string): Promise<WalletRecord | null> {
     return this.prisma.wallet.findUnique({
       where: { id },
@@ -104,11 +113,9 @@ export class WalletRepository {
   }
 
   /**
-   * Cursor-paginated wallet list — used by the admin list endpoint.
-   *
+   * Cursor-paginated wallet list — admin endpoint.
    * Ordered by (createdAt DESC, id DESC) for stable keyset pagination.
    * Fetches limit + 1 rows to determine hasMore without a COUNT query.
-   * Filters are additive (AND).
    */
   async findAll(
     filters: WalletFilters,
@@ -144,16 +151,6 @@ export class WalletRepository {
 
   // ── Ledger reads ───────────────────────────────────────────────────────────
 
-  /**
-   * Cursor-paginated ledger entries for a given wallet.
-   *
-   * Uses the existing @@index([walletId, createdAt]) — the compound keyset
-   * on (createdAt DESC, id DESC) keeps all reads on this index path.
-   *
-   * Fetches limit + 1 rows to determine hasMore without a COUNT query.
-   * The repository receives a decoded KeysetCursor — encoding is the
-   * service's responsibility.
-   */
   async findLedgerPage(
     walletId: string,
     cursor: KeysetCursor | null,
@@ -185,16 +182,29 @@ export class WalletRepository {
     return { entries, hasMore };
   }
 
+  // ── Pessimistic lock ───────────────────────────────────────────────────────
+
   /**
-   * Pessimistic row lock — must be called inside a $transaction block.
-   * Uses SELECT FOR UPDATE to block concurrent mutations on the same wallet row.
+   * Acquires a pessimistic row lock on the wallet for the duration of the
+   * surrounding $transaction block. Must only be called inside a Prisma
+   * interactive transaction.
+   *
+   * ## Type coercion — why this matters
+   * Prisma's $queryRaw returns raw pg wire types. PostgreSQL sends NUMERIC /
+   * DECIMAL columns as text strings over the wire. Without explicit coercion,
+   * callers receive plain strings that look like Prisma.Decimal but are not —
+   * calling `.lessThan()`, `.greaterThan()`, or any Decimal method on them
+   * will throw `TypeError: available.lessThan is not a function` at runtime.
+   *
+   * Every Decimal field is wrapped in `new Prisma.Decimal()` here so that all
+   * downstream guards (`assertSufficientBalance`, `assertCurrencyMatch`, etc.)
+   * receive properly typed values and arithmetic is correct.
    */
   async lockWallet(
     walletId: string,
     tx: Prisma.TransactionClient,
   ): Promise<WalletSnapshot> {
-    // Raw lock — Prisma ORM does not expose FOR UPDATE natively
-    const rows = await tx.$queryRaw<WalletSnapshot[]>`
+    const rows = await tx.$queryRaw<WalletLockRow[]>`
       SELECT
         id,
         "userId",
@@ -207,8 +217,20 @@ export class WalletRepository {
       WHERE id = ${walletId}
       FOR UPDATE
     `;
+
     if (!rows.length) throw new NotFoundException('Wallet not found');
-    return rows[0];
+
+    const row = rows[0];
+
+    return {
+      id: row.id,
+      userId: row.userId,
+      currency: row.currency,
+      status: row.status,
+      availableBalance: new Prisma.Decimal(row.availableBalance),
+      lockedBalance: new Prisma.Decimal(row.lockedBalance),
+      pendingBalance: new Prisma.Decimal(row.pendingBalance),
+    };
   }
 
   // ── Guards (called inside tx after lock) ───────────────────────────────────
@@ -229,7 +251,7 @@ export class WalletRepository {
     }
   }
 
-  // ── Mutations (must be called inside a $transaction block) ─────────────────
+  // ── Balance mutations (must be called inside a $transaction block) ─────────
 
   async creditAvailable(
     walletId: string,

@@ -3,7 +3,6 @@ import { AccountStatus, Prisma, Role } from '@prisma/client';
 import { PrismaService } from '@app/prisma/prisma.service';
 
 // ── Projection constants ───────────────────────────────────────────────────────
-// Defined once here — never risk accidentally selecting `password` elsewhere.
 
 const USER_PUBLIC_SELECT = {
   id: true,
@@ -58,10 +57,6 @@ export class UsersRepository {
 
   // ── Reads ──────────────────────────────────────────────────────────────────
 
-  /**
-   * Fetch a user's public profile with wallet summary.
-   * Returns null when the user does not exist — callers decide the HTTP response.
-   */
   async findById(id: string): Promise<UserWithWallet | null> {
     return this.prisma.user.findUnique({
       where: { id },
@@ -72,10 +67,6 @@ export class UsersRepository {
     });
   }
 
-  /**
-   * Fetches id + password hash only — used exclusively by changePassword.
-   * Returns null when the user does not exist.
-   */
   async findByIdWithPassword(
     id: string,
   ): Promise<{ id: string; password: string } | null> {
@@ -85,10 +76,6 @@ export class UsersRepository {
     });
   }
 
-  /**
-   * Paginated list of users — single round-trip via $transaction([findMany, count]).
-   * Filters are additive (AND). Ordered by createdAt DESC for stable pagination.
-   */
   async findAll(
     filters: UserFilters,
     { page, limit }: PaginationParams,
@@ -114,10 +101,6 @@ export class UsersRepository {
     return { users, total };
   }
 
-  /**
-   * Checks if a phone number is already taken by another user.
-   * Returns the existing user's phone if found, otherwise null.
-   */
   async checkPhoneTaken(phone: string) {
     return this.prisma.user.findFirst({
       where: { phone },
@@ -127,11 +110,6 @@ export class UsersRepository {
 
   // ── Writes ─────────────────────────────────────────────────────────────────
 
-  /**
-   * Update mutable profile fields (name, phone).
-   * Catches P2002 on phone uniqueness — surfaces as ConflictException.
-   * Email is intentionally excluded: email change is a separate, verified flow.
-   */
   async updateProfile(
     id: string,
     data: { name?: string; phone?: string },
@@ -153,12 +131,6 @@ export class UsersRepository {
     }
   }
 
-  /**
-   * Atomically updates the password and revokes all active refresh tokens.
-   *
-   * Both writes are wrapped in a single transaction — if either fails,
-   * neither is committed.
-   */
   async updatePasswordAndRevokeSessions(
     id: string,
     hashedPassword: string,
@@ -176,11 +148,6 @@ export class UsersRepository {
     ]);
   }
 
-  /**
-   * Admin-only: update status and/or role on any user.
-   * Business-rule enforcement (e.g. balance check before CLOSED) happens
-   * in the service — this method executes the mutation unconditionally.
-   */
   async updateStatusOrRole(
     id: string,
     data: { status?: AccountStatus; role?: Role },
@@ -193,15 +160,19 @@ export class UsersRepository {
   }
 
   /**
-   * Atomically closes a user account:
-   *   1. Re-reads wallet balances inside the transaction
-   *   2. Rejects with ConflictException if any funds remain
-   *   3. Sets User.status → CLOSED
-   *   4. Revokes all active refresh tokens
+   * Atomically closes a user account.
    *
-   * Uses the interactive transaction form so conditional logic can execute
-   * inside the same serializable unit. The caller's pre-check in the service
-   * is a fast-path guard; this is the authoritative enforcement.
+   * Sequence inside a single serializable transaction:
+   *   1. Re-reads wallet balances — authoritative check, not the service pre-read.
+   *   2. Rejects with ConflictException if any balance bucket is non-zero.
+   *   3. Sets User.status → CLOSED.
+   *   4. Revokes all active refresh tokens.
+   *
+   * ## Balance comparison
+   * Balances are Prisma.Decimal — JavaScript's `Number()` cannot faithfully
+   * represent all Decimal(18,4) values (precision loss above 2^53). Comparing
+   * with `Prisma.Decimal.isZero()` / `.greaterThan(0)` is exact for all values
+   * within the column's range, which is what financial data requires.
    */
   async closeAccount(userId: string): Promise<void> {
     await this.prisma.$transaction(async (tx) => {
@@ -215,10 +186,11 @@ export class UsersRepository {
       });
 
       if (wallet) {
+        const zero = new Prisma.Decimal(0);
         const hasBalance =
-          Number(wallet.availableBalance) > 0 ||
-          Number(wallet.lockedBalance) > 0 ||
-          Number(wallet.pendingBalance) > 0;
+          wallet.availableBalance.greaterThan(zero) ||
+          wallet.lockedBalance.greaterThan(zero) ||
+          wallet.pendingBalance.greaterThan(zero);
 
         if (hasBalance) {
           throw new ConflictException(

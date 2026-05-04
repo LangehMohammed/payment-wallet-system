@@ -3,7 +3,6 @@ import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
 import { ConfigService } from '@nestjs/config';
 import type { StringValue } from 'ms';
-import { AuditLogger } from '@app/common/audit/audit-logger.service';
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
 import { AuthRepository } from './auth.repository';
@@ -32,7 +31,6 @@ import { SessionService } from './session.service';
     AuthService,
     AuthRepository,
     JwtStrategy,
-    AuditLogger,
     TokenDenylistService,
     TokenCleanupService,
     TokenService,

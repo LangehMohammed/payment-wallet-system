@@ -1,7 +1,16 @@
 import { ConflictException, Injectable } from '@nestjs/common';
 import { PrismaService } from '@app/prisma/prisma.service';
 import { AUTH_CONSTANTS } from './auth.constants';
-import { Prisma } from '@prisma/client';
+import { Prisma, Role } from '@prisma/client';
+
+// ── Input types ───────────────────────────────────────────────────────────────
+
+export interface CreateUserInput {
+  name: string;
+  email: string;
+  phone: string;
+  password: string;
+}
 
 @Injectable()
 export class AuthRepository {
@@ -9,9 +18,6 @@ export class AuthRepository {
 
   // ── User queries ──────────────────────────────────────────────────────────
 
-  /**
-   * Find a user by their email
-   */
   async findByEmail(email: string) {
     return this.prisma.user.findUnique({
       where: { email },
@@ -25,9 +31,6 @@ export class AuthRepository {
     });
   }
 
-  /**
-   * Find a user by their ID
-   */
   async findById(id: string) {
     return this.prisma.user.findUnique({
       where: { id },
@@ -35,10 +38,6 @@ export class AuthRepository {
     });
   }
 
-  /**
-   * Checks if an email or phone number is already taken by another user.
-   * Returns the existing user's email and phone if found, otherwise null.
-   */
   async checkEmailOrPhoneTaken(email: string, phone: string) {
     return this.prisma.user.findFirst({
       where: { OR: [{ email }, { phone }] },
@@ -47,14 +46,23 @@ export class AuthRepository {
   }
 
   /**
-   * Creates a new user and an associated wallet atomically.
-   * Throws ConflictException if email or phone already exists.
+   * Atomically creates a user (role=USER, status=ACTIVE by default from schema)
+   * and an associated wallet inside a single transaction.
+   *
+   * Throws ConflictException on unique constraint violations (email or phone).
+   * Role and status are intentionally not settable here — use the admin
+   * endpoint for privilege escalation after account creation.
    */
-  async createUserWithWallet(data: Prisma.UserCreateInput) {
+  async createUserWithWallet(data: CreateUserInput) {
     try {
       return await this.prisma.$transaction(async (tx) => {
         const user = await tx.user.create({
-          data,
+          data: {
+            name: data.name,
+            email: data.email,
+            phone: data.phone,
+            password: data.password,
+          },
           select: { id: true, email: true, role: true },
         });
         await tx.wallet.create({ data: { userId: user.id } });
@@ -76,10 +84,6 @@ export class AuthRepository {
 
   // ── Session (RefreshToken) queries ────────────────────────────────────────
 
-  /**
-   * Atomically rotates a refresh token: revokes the old token and creates a new one.
-   * Returns the new token record.
-   */
   async rotateRefreshToken(
     oldTokenHash: string,
     newTokenData: {
@@ -105,8 +109,20 @@ export class AuthRepository {
   }
 
   /**
-   * Finds a refresh token by its hash and checks its status with grace period handling.
-   * Returns an object with the token and its status: 'ACTIVE', 'EXPIRED', 'GRACE_PERIOD', 'REUSE_DETECTED', or 'NOT_FOUND'.
+   * Finds a refresh token by hash and classifies its state.
+   *
+   * State machine:
+   *   NOT_FOUND     — hash unknown; treat as invalid.
+   *   EXPIRED       — token exists but past expiresAt; treat as invalid.
+   *   ACTIVE        — not revoked, not expired; normal rotation path.
+   *   GRACE_PERIOD  — revoked within leewaySeconds; allow idempotent replay.
+   *   REUSE_DETECTED — revoked beyond leeway; potential token theft, nuke all sessions.
+   *
+   * ## Ordering rationale
+   * Expiry is checked BEFORE revocation so that a token which is both expired
+   * AND revoked is classified as EXPIRED (invalid, no action needed) rather
+   * than REUSE_DETECTED (which would trigger a nuclear session wipe on a
+   * benign condition — an old token that simply wasn't cleaned up yet).
    */
   async findRefreshTokenWithGrace(
     hash: string,
@@ -118,24 +134,24 @@ export class AuthRepository {
 
     if (!token) return { status: 'NOT_FOUND' as const };
 
+    // Expired tokens are unconditionally invalid regardless of revocation state.
     if (token.expiresAt <= new Date()) {
       return { status: 'EXPIRED' as const, token };
     }
 
+    // Token is within its valid lifetime — check revocation.
     if (!token.revokedAt) return { status: 'ACTIVE' as const, token };
 
-    const diffInSeconds = (Date.now() - token.revokedAt.getTime()) / 1000;
+    const secondsSinceRevocation =
+      (Date.now() - token.revokedAt.getTime()) / 1000;
 
-    if (diffInSeconds <= leewaySeconds) {
+    if (secondsSinceRevocation <= leewaySeconds) {
       return { status: 'GRACE_PERIOD' as const, token };
     }
 
     return { status: 'REUSE_DETECTED' as const, token };
   }
 
-  /**
-   * Revokes a refresh token by its hash. Returns the number of tokens revoked (0 or 1).
-   */
   async revokeRefreshToken(tokenHash: string): Promise<number> {
     const result = await this.prisma.refreshToken.updateMany({
       where: { tokenHash, revokedAt: null },
@@ -144,9 +160,6 @@ export class AuthRepository {
     return result.count;
   }
 
-  /**
-   * Revokes all active tokens for a user. Returns the number of tokens revoked.
-   */
   async revokeAllUserTokens(userId: string): Promise<number> {
     const result = await this.prisma.refreshToken.updateMany({
       where: { userId, revokedAt: null },
@@ -156,10 +169,9 @@ export class AuthRepository {
   }
 
   /**
-   * Creates a new refresh token for a user, enforcing a maximum number of active sessions.
-   * If the limit is exceeded, the oldest active session is revoked.
-   * Uses an advisory lock to prevent race conditions when multiple sessions are created concurrently for the same user.
-   * Returns the new session and the ID of any evicted session.
+   * Creates a new session, evicting the oldest active session if the user
+   * has reached `maxSessions`. Uses a pg advisory lock scoped to the user's
+   * UUID to prevent concurrent session creation races for the same user.
    */
   async createSessionAtomic(
     userId: string,
@@ -168,8 +180,6 @@ export class AuthRepository {
     maxSessions: number,
   ) {
     return this.prisma.$transaction(async (tx) => {
-      // Advisory lock scoped to this user — blocks concurrent session creation
-      // for the same user only, other users are unaffected
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(
         ('x' || substring(replace(${userId}::text, '-', ''), 1, 8))::bit(32)::int,
         ('x' || substring(replace(${userId}::text, '-', ''), 9, 8))::bit(32)::int
@@ -205,10 +215,6 @@ export class AuthRepository {
     });
   }
 
-  /**
-   * Deletes all expired refresh tokens in batches to prevent long-running transactions and reduce DB load.
-   * Returns the total number of tokens deleted.
-   */
   async deleteAllExpiredTokens(
     batchSize = AUTH_CONSTANTS.CLEANUP_BATCH_SIZE,
   ): Promise<number> {
@@ -228,7 +234,6 @@ export class AuthRepository {
 
       if (result < batchSize) break;
 
-      // Yield between batches — prevents sustained DB pressure
       await new Promise((resolve) =>
         setTimeout(resolve, AUTH_CONSTANTS.CLEANUP_BATCH_DELAY_MS),
       );

@@ -22,8 +22,15 @@ import * as crypto from 'crypto';
  *
  * ## Key derivation
  * CACHE_ENCRYPTION_KEY is a 64-char hex string (32 bytes / 256 bits).
- * It is validated at startup in onModuleInit — misconfiguration surfaces
- * immediately, not on the first cache write.
+ * It is validated eagerly in the constructor — misconfiguration surfaces
+ * at module load time, not on the first cache write.
+ *
+ * ## Constructor vs onModuleInit resolution
+ * The key is resolved in the constructor rather than onModuleInit so that
+ * unit tests using `new CryptoService(configService)` (without triggering
+ * the NestJS lifecycle) can call encrypt/decrypt immediately. onModuleInit
+ * is retained as a no-op hook for interface compliance; the constructor
+ * resolution is idempotent and safe to call multiple times.
  *
  * ## Key separation
  * TOKEN_HASH_SECRET and CACHE_ENCRYPTION_KEY are intentionally separate env
@@ -33,16 +40,24 @@ import * as crypto from 'crypto';
 @Injectable()
 export class CryptoService implements OnModuleInit {
   private static readonly ALGORITHM = 'aes-256-gcm' as const;
-  private static readonly IV_BYTES = 12; // 96-bit IV — GCM standard
+  private static readonly IV_BYTES = 12; // 96-bit IV  — GCM standard
   private static readonly TAG_BYTES = 16; // 128-bit auth tag — GCM maximum
   private static readonly KEY_HEX_LENGTH = 64; // 32 bytes = 256 bits as hex
 
-  private encryptionKey: Buffer;
+  private readonly encryptionKey: Buffer;
 
-  constructor(private readonly configService: ConfigService) {}
-
-  onModuleInit(): void {
+  constructor(private readonly configService: ConfigService) {
+    // Resolve and validate immediately so any misconfiguration is caught at
+    // startup (or test instantiation) rather than silently at first use.
     this.encryptionKey = this.resolveKey();
+  }
+
+  /**
+   * Retained for NestJS lifecycle interface compliance.
+   * Key resolution has already happened in the constructor — this is a no-op.
+   */
+  onModuleInit(): void {
+    // Intentional no-op: key resolved in constructor.
   }
 
   // ── Public API ───────────────────────────────────────────────────────────────
@@ -97,10 +112,6 @@ export class CryptoService implements OnModuleInit {
 
   // ── Key resolution ───────────────────────────────────────────────────────────
 
-  /**
-   * Resolves and validates the encryption key from configuration.
-   * Throws if the key is missing, the wrong length, or contains non-hex chars.
-   */
   private resolveKey(): Buffer {
     const hex = this.configService.get<string>('cache.encryptionKey');
 

@@ -4,11 +4,16 @@ import {
   Injectable,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import { Prisma, Provider } from '@prisma/client';
+import { Prisma, Provider, Transaction } from '@prisma/client';
 import { AuditLogger } from '@app/common/audit/audit-logger.service';
 import { PrismaService } from '@app/prisma/prisma.service';
 import { TransactionRepository } from './transaction.repository';
-import { DepositDto, TransferDto, TransactionQueryDto, WithdrawalDto } from './dto/transaction.dto';
+import {
+  DepositDto,
+  TransferDto,
+  TransactionQueryDto,
+  WithdrawalDto,
+} from './dto/transaction.dto';
 import { WalletRepository } from '../wallet/wallet.repository';
 
 // ─── Response shapes ──────────────────────────────────────────────────────────
@@ -35,6 +40,21 @@ export interface PaginatedTransactions {
   };
 }
 
+/**
+ * Wraps a mutation result with a replay flag so the controller can set the
+ * `Idempotency-Replayed: true` response header without inspecting business data.
+ *
+ * `replayed: true`  — idempotency key already seen; original result returned.
+ * `replayed: false` — new operation; result freshly created.
+ *
+ * The public API response body is always `TransactionResult`. The flag only
+ * affects the response header, keeping the body shape stable for all clients.
+ */
+export interface MutationResult {
+  data: TransactionResult;
+  replayed: boolean;
+}
+
 @Injectable()
 export class TransactionService {
   constructor(
@@ -55,42 +75,42 @@ export class TransactionService {
    *   Phase 2 — SETTLEMENT (triggered by provider webhook / outbox worker):
    *     Move pendingBalance → availableBalance → update Transaction → SETTLED.
    *
-   * Idempotency: duplicate idempotencyKey returns the original transaction.
+   * Idempotency: duplicate idempotencyKey returns the original transaction
+   * with `replayed: true` so the controller can signal this to the client.
    */
-  async deposit(
-    userId: string,
-    dto: DepositDto,
-  ): Promise<TransactionResult> {
-    // ── Idempotency check (outside tx — cheap read first) ──────────────────
+  async deposit(userId: string, dto: DepositDto): Promise<MutationResult> {
     const existing = await this.transactionRepository.findByIdempotencyKey(
       dto.idempotencyKey,
     );
     if (existing) {
       this.audit.log('IDEMPOTENT_REPLAY', {
         userId,
-        meta: { idempotencyKey: dto.idempotencyKey, transactionId: existing.id },
+        meta: {
+          idempotencyKey: dto.idempotencyKey,
+          transactionId: existing.id,
+        },
       });
-      return this.toResult(existing);
+      return { data: this.toResult(existing), replayed: true };
     }
 
     const amount = new Prisma.Decimal(dto.amount);
 
     const result = await this.prisma.$transaction(async (tx) => {
-      // Lock wallet row — prevents concurrent deposit/withdrawal races
       const wallet = await this.walletRepository.findByUserId(userId);
+      if (!wallet) throw new ForbiddenException('Wallet not found');
+
       const locked = await this.walletRepository.lockWallet(wallet.id, tx);
 
       this.walletRepository.assertActive(locked);
       this.walletRepository.assertCurrencyMatch(locked, dto.currency);
 
-      // Credit pendingBalance — funds not yet spendable
       const pendingBalanceAfter = await this.walletRepository.creditPending(
         locked.id,
         amount,
         tx,
       );
 
-      const transaction = await this.transactionRepository.initiateDeposit(
+      return this.transactionRepository.initiateDeposit(
         {
           idempotencyKey: dto.idempotencyKey,
           type: 'DEPOSIT' as any,
@@ -99,7 +119,7 @@ export class TransactionService {
           currency: dto.currency,
           description: dto.description,
           receiverWalletId: locked.id,
-          provider: Provider.INTERNAL, // Override with STRIPE/PAYPAL when integrated
+          provider: Provider.INTERNAL,
         },
         pendingBalanceAfter,
         {
@@ -110,8 +130,6 @@ export class TransactionService {
         } satisfies Prisma.InputJsonValue,
         tx,
       );
-
-      return transaction;
     });
 
     this.audit.log('DEPOSIT_INITIATED', {
@@ -123,7 +141,7 @@ export class TransactionService {
       },
     });
 
-    return this.toResult(result);
+    return { data: this.toResult(result), replayed: false };
   }
 
   // ── Withdrawal ─────────────────────────────────────────────────────────────
@@ -136,41 +154,42 @@ export class TransactionService {
    *
    *   Phase 2 — SETTLEMENT (outbox worker after provider confirms):
    *     Debit lockedBalance → Transaction → SETTLED.
-   *
-   *   Funds are unavailable (locked) while withdrawal is in-flight.
    */
-  async withdraw(
-    userId: string,
-    dto: WithdrawalDto,
-  ): Promise<TransactionResult> {
+  async withdraw(userId: string, dto: WithdrawalDto): Promise<MutationResult> {
     const existing = await this.transactionRepository.findByIdempotencyKey(
       dto.idempotencyKey,
     );
     if (existing) {
       this.audit.log('IDEMPOTENT_REPLAY', {
         userId,
-        meta: { idempotencyKey: dto.idempotencyKey, transactionId: existing.id },
+        meta: {
+          idempotencyKey: dto.idempotencyKey,
+          transactionId: existing.id,
+        },
       });
-      return this.toResult(existing);
+      return { data: this.toResult(existing), replayed: true };
     }
 
     const amount = new Prisma.Decimal(dto.amount);
 
     const result = await this.prisma.$transaction(async (tx) => {
       const wallet = await this.walletRepository.findByUserId(userId);
+      if (!wallet) throw new ForbiddenException('Wallet not found');
+
       const locked = await this.walletRepository.lockWallet(wallet.id, tx);
 
       this.walletRepository.assertActive(locked);
       this.walletRepository.assertCurrencyMatch(locked, dto.currency);
       this.assertSufficientBalance(locked.availableBalance, amount, userId);
 
-      const { lockedBalance } = await this.walletRepository.debitAvailableAndLock(
-        locked.id,
-        amount,
-        tx,
-      );
+      const { lockedBalance } =
+        await this.walletRepository.debitAvailableAndLock(
+          locked.id,
+          amount,
+          tx,
+        );
 
-      const transaction = await this.transactionRepository.initiateWithdrawal(
+      return this.transactionRepository.initiateWithdrawal(
         {
           idempotencyKey: dto.idempotencyKey,
           type: 'WITHDRAWAL' as any,
@@ -190,8 +209,6 @@ export class TransactionService {
         } satisfies Prisma.InputJsonValue,
         tx,
       );
-
-      return transaction;
     });
 
     this.audit.log('WITHDRAWAL_INITIATED', {
@@ -203,7 +220,7 @@ export class TransactionService {
       },
     });
 
-    return this.toResult(result);
+    return { data: this.toResult(result), replayed: false };
   }
 
   // ── Transfer ───────────────────────────────────────────────────────────────
@@ -216,10 +233,7 @@ export class TransactionService {
    *
    *   Lock ordering: always lock lower UUID first to eliminate deadlock cycles.
    */
-  async transfer(
-    userId: string,
-    dto: TransferDto,
-  ): Promise<TransactionResult> {
+  async transfer(userId: string, dto: TransferDto): Promise<MutationResult> {
     if (userId === dto.recipientUserId) {
       throw new BadRequestException('Cannot transfer to yourself.');
     }
@@ -230,18 +244,26 @@ export class TransactionService {
     if (existing) {
       this.audit.log('IDEMPOTENT_REPLAY', {
         userId,
-        meta: { idempotencyKey: dto.idempotencyKey, transactionId: existing.id },
+        meta: {
+          idempotencyKey: dto.idempotencyKey,
+          transactionId: existing.id,
+        },
       });
-      return this.toResult(existing);
+      return { data: this.toResult(existing), replayed: true };
     }
 
     const amount = new Prisma.Decimal(dto.amount);
 
-    // Resolve wallet IDs before entering the transaction
+    // Resolve wallet IDs before the transaction — needed for deadlock-safe
+    // lock ordering. These reads are stale by lock time, but IDs are immutable.
     const [senderWallet, receiverWallet] = await Promise.all([
       this.walletRepository.findByUserId(userId),
       this.walletRepository.findByUserId(dto.recipientUserId),
     ]);
+
+    if (!senderWallet) throw new ForbiddenException('Sender wallet not found');
+    if (!receiverWallet)
+      throw new ForbiddenException('Recipient wallet not found');
 
     const result = await this.prisma.$transaction(async (tx) => {
       // Consistent lock ordering — prevents AB/BA deadlock across concurrent transfers
@@ -263,7 +285,11 @@ export class TransactionService {
       this.walletRepository.assertActive(lockedReceiver);
       this.walletRepository.assertCurrencyMatch(lockedSender, dto.currency);
       this.walletRepository.assertCurrencyMatch(lockedReceiver, dto.currency);
-      this.assertSufficientBalance(lockedSender.availableBalance, amount, userId);
+      this.assertSufficientBalance(
+        lockedSender.availableBalance,
+        amount,
+        userId,
+      );
 
       const senderBalanceAfter = await this.walletRepository.debitAvailable(
         lockedSender.id,
@@ -277,7 +303,7 @@ export class TransactionService {
         tx,
       );
 
-      const transaction = await this.transactionRepository.executeTransfer(
+      return this.transactionRepository.executeTransfer(
         {
           idempotencyKey: dto.idempotencyKey,
           type: 'TRANSFER' as any,
@@ -300,8 +326,6 @@ export class TransactionService {
         } satisfies Prisma.InputJsonValue,
         tx,
       );
-
-      return transaction;
     });
 
     this.audit.log('TRANSFER_SETTLED', {
@@ -314,7 +338,7 @@ export class TransactionService {
       },
     });
 
-    return this.toResult(result);
+    return { data: this.toResult(result), replayed: false };
   }
 
   // ── Queries ────────────────────────────────────────────────────────────────
@@ -324,14 +348,17 @@ export class TransactionService {
     query: TransactionQueryDto,
   ): Promise<PaginatedTransactions> {
     const wallet = await this.walletRepository.findByUserId(userId);
-    const { items, total } = await this.transactionRepository.findByWalletPaginated(
-      wallet.id,
-      query.page,
-      query.limit,
-    );
+    if (!wallet) throw new ForbiddenException('Wallet not found');
+
+    const { items, total } =
+      await this.transactionRepository.findByWalletPaginated(
+        wallet.id,
+        query.page,
+        query.limit,
+      );
 
     return {
-      items: items.map(this.toResult),
+      items: items.map((t) => this.toResult(t)),
       meta: {
         total,
         page: query.page,
@@ -346,7 +373,10 @@ export class TransactionService {
     transactionId: string,
   ): Promise<TransactionResult> {
     const wallet = await this.walletRepository.findByUserId(userId);
-    const transaction = await this.transactionRepository.findById(transactionId);
+    if (!wallet) throw new ForbiddenException('Wallet not found');
+
+    const transaction =
+      await this.transactionRepository.findById(transactionId);
 
     if (
       !transaction ||
@@ -381,7 +411,12 @@ export class TransactionService {
 
   // ── Mapping ────────────────────────────────────────────────────────────────
 
-  private toResult(transaction: any): TransactionResult {
+  /**
+   * Maps a Prisma Transaction record to the public TransactionResult shape.
+   * Typed as `Transaction` (Prisma-generated) — not `any` — so the compiler
+   * enforces valid field access and catches schema regressions.
+   */
+  private toResult(transaction: Transaction): TransactionResult {
     return {
       id: transaction.id,
       idempotencyKey: transaction.idempotencyKey,

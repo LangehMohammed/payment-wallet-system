@@ -10,6 +10,7 @@ import { LoginDto, RegisterDto } from './dto';
 import { TokenService } from './token.service';
 import { AccountStatus } from '@prisma/client';
 import { SessionService } from './session.service';
+import { AUTH_CONSTANTS } from './auth.constants';
 
 @Injectable()
 export class AuthService {
@@ -21,28 +22,25 @@ export class AuthService {
   ) {}
 
   /**
-   * Pre-computed hash for "dummy_password" to mitigate timing attacks
+   * Pre-computed hash for "dummy_password" to mitigate timing attacks.
    *
    * IMPORTANT: argon2id parameters (m=65536, t=3, p=4) MUST stay in sync with
-   * the parameters used in register(). A mismatch causes verify to run at a
-   * different cost than a real hash lookup, reintroducing a timing delta.
+   * the parameters used in register() and changePassword(). A mismatch causes
+   * verify() to run at a different cost than a real hash lookup, reintroducing
+   * a timing delta. Parameters are sourced from AUTH_CONSTANTS to enforce this.
+   *
+   * To regenerate:
+   *   node -e "require('argon2').hash('dummy_password',
+   *     { type: require('argon2').argon2id, memoryCost: 65536, timeCost: 3, parallelism: 4 })
+   *     .then(console.log)"
    */
   private static readonly DUMMY_HASH =
     '$argon2id$v=19$m=65536,t=3,p=4$hlbOyIMZD2kSF2Zg2S12AQ$pZ32MvUaWfL9Qh3c87DX/lOFpPjzeT00a1fYJGAhWl8';
 
-  /**
-   * Registers a new user with the provided details.
-   * - Creates a new user and associated wallet in the database.
-   * - Generates access and refresh tokens for the new user.
-   * - Persists the refresh token in the session store with user agent info.
-   */
+  // ── Registration ───────────────────────────────────────────────────────────
+
   async register(dto: RegisterDto, userAgent?: string) {
-    const hashed = await argon2.hash(dto.password, {
-      type: argon2.argon2id,
-      memoryCost: 64 * 1024,
-      timeCost: 3,
-      parallelism: 4,
-    });
+    const hashed = await argon2.hash(dto.password, AUTH_CONSTANTS.ARGON2_OPTIONS);
 
     const user = await this.authRepository.createUserWithWallet({
       name: dto.name,
@@ -67,13 +65,8 @@ export class AuthService {
     return tokens;
   }
 
-  /**
-   * Authenticates a user with email and password.
-   * - Verifies the provided credentials against stored user data.
-   * - Checks if the user's account is active before allowing login.
-   * - Generates access and refresh tokens upon successful authentication.
-   * - Persists the refresh token in the session store with user agent info.
-   */
+  // ── Login ──────────────────────────────────────────────────────────────────
+
   async login(dto: LoginDto, userAgent?: string) {
     const email = this.normalizeEmail(dto.email);
     const user = await this.authRepository.findByEmail(email);
@@ -109,13 +102,8 @@ export class AuthService {
     return tokens;
   }
 
-  /**
-   * Refreshes access and refresh tokens using a valid refresh token.
-   * - Validates the provided refresh token against stored sessions.
-   * - Implements a grace period to handle potential token reuse scenarios.
-   * - Generates new tokens and updates the session store accordingly.
-   * - Logs relevant events for security monitoring and auditing.
-   */
+  // ── Token refresh ──────────────────────────────────────────────────────────
+
   async refresh(rawRefreshToken: string, userAgent?: string) {
     const hash = this.tokenService.hashToken(rawRefreshToken);
     const session = await this.sessionService.findTokenWithGrace(hash);
@@ -177,11 +165,7 @@ export class AuthService {
 
     await this.sessionService.rotateToken(
       hash,
-      {
-        userId: user.id,
-        tokenHash: newHash,
-        expiresAt,
-      },
+      { userId: user.id, tokenHash: newHash, expiresAt },
       tokens,
     );
 
@@ -189,13 +173,8 @@ export class AuthService {
     return tokens;
   }
 
-  /**
-   * Logs out a user by revoking the provided refresh token and associated access token.
-   * - Validates the refresh token and checks for potential reuse scenarios.
-   * - Revokes the access token associated with the provided JTI (JWT ID).
-   * - If the refresh token is active, it is revoked to prevent further use.
-   * - Logs relevant events for security monitoring and auditing.
-   */
+  // ── Logout ─────────────────────────────────────────────────────────────────
+
   async logout(
     rawRefreshToken: string,
     userId: string,
@@ -222,7 +201,6 @@ export class AuthService {
     }
 
     await this.sessionService.clearRotationCache(hash);
-
     await this.sessionService.revokeAccessToken(jti);
 
     if (result.status === 'ACTIVE') {
@@ -233,18 +211,21 @@ export class AuthService {
   }
 
   /**
-   * Logs out a user from all sessions by revoking all active tokens.
-   * - Revokes all refresh tokens associated with the user, effectively logging them out from all devices.
-   * - Logs the event for auditing purposes.
+   * Revokes every active refresh token for this user AND denylists the
+   * caller's current access token.
+   *
+   * Without denylisting the JTI, the access token that authorized this request
+   * remains valid until its natural expiry — leaving a window where a
+   * compromised token could still be used despite "logging out everywhere."
    */
-  async logoutAll(userId: string) {
+  async logoutAll(userId: string, jti: string, userAgent?: string) {
     await this.sessionService.revokeAllTokens(userId);
-    void this.audit.log('LOGOUT_ALL', { userId });
+    await this.sessionService.revokeAccessToken(jti);
+    void this.audit.log('LOGOUT_ALL', { userId, userAgent });
   }
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
+  // ── Helpers ────────────────────────────────────────────────────────────────
 
-  // Helper method to normalize email addresses for consistent processing
   private normalizeEmail(email: string): string {
     return email.toLowerCase().trim();
   }
