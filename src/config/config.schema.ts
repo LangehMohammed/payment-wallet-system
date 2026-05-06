@@ -70,15 +70,34 @@ export const configValidationSchema = Joi.object({
     then: Joi.required(),
     otherwise: Joi.optional(),
   }),
-  SWAGGER_PASSWORD: Joi.string().min(16).when('ENV', {
-    is: Joi.valid('development', 'test'),
-    then: Joi.required(),
-    otherwise: Joi.optional(),
-  }),
+  SWAGGER_PASSWORD: Joi.string()
+    .min(16)
+    .when('ENV', {
+      is: Joi.valid('development', 'test'),
+      then: Joi.required(),
+      otherwise: Joi.optional(),
+    }),
 
   // Third-Party Providers
-  // STRIPE_SECRET_KEY: Joi.string().when('ENV', {
-  //   is: 'production',
-  //   then: Joi.required(),
-  // }),
+  PAYPAL_CLIENT_ID: Joi.string().when('ENV', {
+    is: 'production',
+    then: Joi.required(),
+  }),
+  PAYPAL_CLIENT_SECRET: Joi.string().when('ENV', {
+    is: 'production',
+    then: Joi.required(),
+  }),
+  PAYPAL_WEBHOOK_ID: Joi.string().when('ENV', {
+    is: 'production',
+    then: Joi.required(),
+  }),
+
+  STRIPE_SECRET_KEY: Joi.string().when('ENV', {
+    is: 'production',
+    then: Joi.required(),
+  }),
+  STRIPE_WEBHOOK_SECRET: Joi.string().when('ENV', {
+    is: 'production',
+    then: Joi.required(),
+  }),
 });

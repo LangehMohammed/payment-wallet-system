@@ -40,7 +40,10 @@ export class AuthService {
   // ── Registration ───────────────────────────────────────────────────────────
 
   async register(dto: RegisterDto, userAgent?: string) {
-    const hashed = await argon2.hash(dto.password, AUTH_CONSTANTS.ARGON2_OPTIONS);
+    const hashed = await argon2.hash(
+      dto.password,
+      AUTH_CONSTANTS.ARGON2_OPTIONS,
+    );
 
     const user = await this.authRepository.createUserWithWallet({
       name: dto.name,

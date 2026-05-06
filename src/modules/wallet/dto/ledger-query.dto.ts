@@ -7,7 +7,8 @@ export class LedgerQueryDto {
     description:
       'Opaque cursor returned by the previous page response. ' +
       'Omit to fetch the first page.',
-    example: 'eyJjcmVhdGVkQXQiOiIyMDI1LTAxLTAxVDAwOjAwOjAwLjAwMFoiLCJpZCI6InV1aWQifQ==',
+    example:
+      'eyJjcmVhdGVkQXQiOiIyMDI1LTAxLTAxVDAwOjAwOjAwLjAwMFoiLCJpZCI6InV1aWQifQ==',
   })
   @IsOptional()
   @IsBase64()

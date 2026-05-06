@@ -21,13 +21,11 @@ export class ResponseInterceptor<T> implements NestInterceptor<
     _context: ExecutionContext,
     next: CallHandler,
   ): Observable<ApiResponse<T>> {
-    return next
-      .handle()
-      .pipe(
-        map((data) => ({
-          data,
-          meta: { timestamp: new Date().toISOString() },
-        })),
-      );
+    return next.handle().pipe(
+      map((data) => ({
+        data,
+        meta: { timestamp: new Date().toISOString() },
+      })),
+    );
   }
 }

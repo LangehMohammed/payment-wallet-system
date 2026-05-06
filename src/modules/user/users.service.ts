@@ -96,7 +96,10 @@ export class UsersService {
 
     // Uses AUTH_CONSTANTS.ARGON2_OPTIONS — same parameters as register() and
     // the DUMMY_HASH pre-computation. A mismatch would reintroduce timing deltas.
-    const hashed = await argon2.hash(dto.newPassword, AUTH_CONSTANTS.ARGON2_OPTIONS);
+    const hashed = await argon2.hash(
+      dto.newPassword,
+      AUTH_CONSTANTS.ARGON2_OPTIONS,
+    );
 
     await this.usersRepository.updatePasswordAndRevokeSessions(userId, hashed);
 

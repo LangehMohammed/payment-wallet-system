@@ -20,6 +20,7 @@ import { AuditModule } from './common/audit/audit.module';
 import { UsersModule } from './modules/user/users.module';
 import { WalletModule } from './modules/wallet/wallet.module';
 import { TransactionModule } from './modules/transaction/transaction.module';
+import { PaymentModule } from './modules/payment/payment.module';
 
 @Module({
   imports: [
@@ -49,6 +50,7 @@ import { TransactionModule } from './modules/transaction/transaction.module';
     UsersModule,
     WalletModule,
     TransactionModule,
+    PaymentModule,
   ],
   controllers: [AppController],
   providers: [

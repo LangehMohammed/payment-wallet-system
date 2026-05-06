@@ -121,7 +121,10 @@ export class SessionService {
    * Prefixed with `rcache:v1:` to allow safe key-space iteration and future
    * schema versioning without collisions against denylist or other Redis keys.
    */
-  async storeRotationCache(oldTokenHash: string, tokens: TokenPair): Promise<void> {
+  async storeRotationCache(
+    oldTokenHash: string,
+    tokens: TokenPair,
+  ): Promise<void> {
     const key = this.rotationCacheKey(oldTokenHash);
     const ttl = AUTH_CONSTANTS.REFRESH_TOKEN_GRACE_PERIOD_SECONDS;
 

@@ -7,10 +7,8 @@ export default () => ({
   database: {
     url: process.env.DATABASE_URL,
     poolSize: parseInt(process.env.DATABASE_POOL_SIZE, 10) || 10,
-    slowQueryThresholdMs: parseInt(
-      process.env.SLOW_QUERY_THRESHOLD_MS,
-      10,
-    ) || 100,
+    slowQueryThresholdMs:
+      parseInt(process.env.SLOW_QUERY_THRESHOLD_MS, 10) || 100,
   },
   jwt: {
     accessSecret: process.env.JWT_ACCESS_SECRET,
@@ -34,5 +32,14 @@ export default () => ({
   swagger: {
     user: process.env.SWAGGER_USER,
     password: process.env.SWAGGER_PASSWORD,
+  },
+  paypal: {
+    clientId: process.env.PAYPAL_CLIENT_ID,
+    clientSecret: process.env.PAYPAL_CLIENT_SECRET,
+    webhookId: process.env.PAYPAL_WEBHOOK_ID,
+  },
+  stripe: {
+    secretKey: process.env.STRIPE_SECRET_KEY,
+    webhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
   },
 });

@@ -287,7 +287,9 @@ export class TransactionRepository {
       where: { id: transactionId },
       data: {
         status,
-        ...(status === TransactionStatus.SETTLED ? { settledAt: new Date() } : {}),
+        ...(status === TransactionStatus.SETTLED
+          ? { settledAt: new Date() }
+          : {}),
       },
     });
   }
