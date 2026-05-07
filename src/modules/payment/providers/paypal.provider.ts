@@ -5,7 +5,7 @@ import {
   IPaymentProvider,
   DepositIntentResult,
 } from './interface/payment-provider.interface';
-import { ProviderResult } from '../dto/provider-result.dto';
+import { ProviderResult } from '../dto';
 
 /**
  * PayPal payment provider adapter (Braintree for deposits, PayPal Payouts for withdrawals).

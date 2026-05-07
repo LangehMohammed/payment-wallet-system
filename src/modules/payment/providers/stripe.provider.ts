@@ -5,7 +5,7 @@ import {
   IPaymentProvider,
   DepositIntentResult,
 } from './interface/payment-provider.interface';
-import { ProviderResult } from '../dto/provider-result.dto';
+import { ProviderResult } from '../dto';
 
 /**
  * Stripe payment provider adapter.

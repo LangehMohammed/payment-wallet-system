@@ -1,4 +1,4 @@
-import { ProviderResult } from '../../dto/provider-result.dto';
+import { ProviderResult } from '../../dto';
 import { TransactionType } from '@prisma/client';
 
 /**

@@ -3,13 +3,18 @@ import {
   Logger,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import { Provider, TransactionStatus, TransactionType } from '@prisma/client';
+import {
+  Currency,
+  Provider,
+  TransactionStatus,
+  TransactionType,
+} from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '@app/prisma/prisma.service';
 import { AuditLogger } from '@app/common/audit/audit-logger.service';
 import { WalletRepository } from '../wallet/wallet.repository';
 import { PaymentRepository } from './payment.repository';
-import { ProviderResult } from './dto/provider-result.dto';
+import { ProviderResult } from './dto';
 
 interface TransactionContext {
   id: string;
@@ -152,7 +157,11 @@ export class PaymentSettlementService {
 
     // Stamp providerRef and mark SETTLED
     if (result.providerRef) {
-      await this.paymentRepository.setProviderRef(txCtx.id, result.providerRef, tx);
+      await this.paymentRepository.setProviderRef(
+        txCtx.id,
+        result.providerRef,
+        tx,
+      );
     }
 
     await tx.transaction.update({
@@ -170,7 +179,7 @@ export class PaymentSettlementService {
         transactionId: txCtx.id,
         direction: 'CREDIT',
         amount: txCtx.amount,
-        currency: txCtx.currency as any,
+        currency: txCtx.currency as Currency,
         balanceAfter: availableBalanceAfter,
       },
     });
@@ -208,7 +217,11 @@ export class PaymentSettlementService {
     );
 
     if (result.providerRef) {
-      await this.paymentRepository.setProviderRef(txCtx.id, result.providerRef, tx);
+      await this.paymentRepository.setProviderRef(
+        txCtx.id,
+        result.providerRef,
+        tx,
+      );
     }
 
     await tx.transaction.update({
@@ -321,9 +334,12 @@ export class PaymentSettlementService {
 
     await this.paymentRepository.markDelivered(outboxEventId, tx);
 
-    this.logger.warn('Withdrawal failed — locked balance restored to available', {
-      transactionId: txCtx.id,
-      errorMessage: result.errorMessage,
-    });
+    this.logger.warn(
+      'Withdrawal failed — locked balance restored to available',
+      {
+        transactionId: txCtx.id,
+        errorMessage: result.errorMessage,
+      },
+    );
   }
 }
