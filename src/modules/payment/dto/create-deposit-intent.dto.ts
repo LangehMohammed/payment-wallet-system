@@ -1,5 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { Provider, Currency } from '@prisma/client';
+import { Currency } from '@prisma/client';
 import {
   IsEnum,
   IsNumber,

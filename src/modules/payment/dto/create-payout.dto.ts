@@ -11,6 +11,7 @@ import {
   MaxLength,
   IsOptional,
   ValidateIf,
+  IsEmail,
 } from 'class-validator';
 
 const SupportedProviders = {
@@ -22,22 +23,25 @@ type SupportedProvider =
   (typeof SupportedProviders)[keyof typeof SupportedProviders];
 
 /**
- * Request DTO for POST /payments/deposits/confirm
+ * Request DTO for POST /payments/payouts/create
  *
- * Confirms a deposit after the frontend has collected payment details.
- * Creates a Transaction (INITIATED) and OutboxEvent for async settlement.
+ * Creates a payout (withdrawal) to an external account.
+ * Creates Transaction (INITIATED) + OutboxEvent for async processing.
  */
-export class ConfirmDepositDto {
+export class CreatePayoutDto {
   @ApiProperty({
-    description: 'Payment provider used',
+    description: 'Payment provider to use',
     enum: [SupportedProviders.STRIPE, SupportedProviders.PAYPAL],
     example: SupportedProviders.STRIPE,
   })
-  @IsEnum(SupportedProviders)
+  @IsEnum([SupportedProviders.STRIPE, SupportedProviders.PAYPAL], {
+    message:
+      'provider must be STRIPE or PAYPAL (INTERNAL is not supported for payouts)',
+  })
   provider: SupportedProvider;
 
   @ApiProperty({
-    description: 'Amount in major currency units (must match intent amount)',
+    description: 'Amount in major currency units (e.g., 100.50 USD)',
     example: 100.5,
   })
   @IsNumber({ maxDecimalPlaces: 4 })
@@ -46,7 +50,7 @@ export class ConfirmDepositDto {
   amount: number;
 
   @ApiProperty({
-    description: 'Currency code (must match intent currency)',
+    description: 'Currency code',
     enum: Currency,
     example: Currency.USD,
   })
@@ -61,8 +65,8 @@ export class ConfirmDepositDto {
   idempotencyKey: string;
 
   @ApiProperty({
-    description: 'Optional transaction description',
-    example: 'Wallet top-up via bank account',
+    description: 'Optional payout description',
+    example: 'Withdrawal to bank account',
     required: false,
   })
   @IsOptional()
@@ -74,34 +78,25 @@ export class ConfirmDepositDto {
   // ── Stripe-specific fields ────────────────────────────────────────────────
 
   @ApiProperty({
-    description: 'Stripe PaymentIntent ID (required if provider is STRIPE)',
-    example: 'pi_1234567890abcdef',
+    description:
+      'Stripe Connect Express account ID (required if provider is STRIPE)',
+    example: 'acct_1234567890abcdef',
     required: false,
   })
   @ValidateIf((o) => o.provider === SupportedProviders.STRIPE)
   @IsString()
   @IsNotEmpty()
-  paymentIntentId?: string;
+  stripeConnectedAccountId?: string;
 
-  // ── Braintree-specific fields ─────────────────────────────────────────────
+  // ── PayPal-specific fields ─────────────────────────────────────────────────
 
   @ApiProperty({
     description:
-      'Braintree payment method nonce (required if provider is PAYPAL)',
-    example: 'nonce_from_drop_in_ui',
+      'PayPal email address for payout (required if provider is PAYPAL)',
+    example: 'user@example.com',
     required: false,
   })
   @ValidateIf((o) => o.provider === SupportedProviders.PAYPAL)
-  @IsString()
-  @IsNotEmpty()
-  nonce?: string;
-
-  @ApiProperty({
-    description: 'Braintree customer ID for vaulting (optional, PAYPAL only)',
-    example: 'braintree_customer_123',
-    required: false,
-  })
-  @IsOptional()
-  @IsString()
-  braintreeCustomerId?: string;
+  @IsEmail()
+  paypalEmail?: string;
 }
