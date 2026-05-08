@@ -79,15 +79,15 @@ export const configValidationSchema = Joi.object({
     }),
 
   // Third-Party Providers
-  PAYPAL_CLIENT_ID: Joi.string().when('ENV', {
+  BRAINTREE_MERCHANT_ID: Joi.string().when('ENV', {
     is: 'production',
     then: Joi.required(),
   }),
-  PAYPAL_CLIENT_SECRET: Joi.string().when('ENV', {
+  BRAINTREE_PUBLIC_KEY: Joi.string().when('ENV', {
     is: 'production',
     then: Joi.required(),
   }),
-  PAYPAL_WEBHOOK_ID: Joi.string().when('ENV', {
+  BRAINTREE_PRIVATE_KEY: Joi.string().when('ENV', {
     is: 'production',
     then: Joi.required(),
   }),

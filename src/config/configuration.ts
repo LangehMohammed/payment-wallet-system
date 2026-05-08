@@ -33,10 +33,10 @@ export default () => ({
     user: process.env.SWAGGER_USER,
     password: process.env.SWAGGER_PASSWORD,
   },
-  paypal: {
-    clientId: process.env.PAYPAL_CLIENT_ID,
-    clientSecret: process.env.PAYPAL_CLIENT_SECRET,
-    webhookId: process.env.PAYPAL_WEBHOOK_ID,
+  braintree: {
+    merchantId: process.env.BRAINTREE_MERCHANT_ID,
+    publicKey: process.env.BRAINTREE_PUBLIC_KEY,
+    privateKey: process.env.BRAINTREE_PRIVATE_KEY,
   },
   stripe: {
     secretKey: process.env.STRIPE_SECRET_KEY,

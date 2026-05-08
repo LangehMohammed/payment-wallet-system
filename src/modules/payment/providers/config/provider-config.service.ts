@@ -12,11 +12,11 @@ export class ProviderConfigService {
     };
   }
 
-  getPaypalConfig() {
+  getBraintreeConfig() {
     return {
-      clientId: this.configService.get<string>('paypal.clientId'),
-      clientSecret: this.configService.get<string>('paypal.clientSecret'),
-      webhookId: this.configService.get<string>('paypal.webhookId'),
+      merchantId: this.configService.get<string>('braintree.merchantId'),
+      publicKey: this.configService.get<string>('braintree.publicKey'),
+      privateKey: this.configService.get<string>('braintree.privateKey'),
     };
   }
 }
