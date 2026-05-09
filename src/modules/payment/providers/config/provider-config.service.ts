@@ -5,14 +5,14 @@ import { ConfigService } from '@nestjs/config';
 export class ProviderConfigService {
   constructor(private readonly configService: ConfigService) {}
 
-  getStripeConfig() {
+  get StripeConfig() {
     return {
       secretKey: this.configService.get<string>('stripe.secretKey'),
       webhookSecret: this.configService.get<string>('stripe.webhookSecret'),
     };
   }
 
-  getBraintreeConfig() {
+  get BraintreeConfig() {
     return {
       merchantId: this.configService.get<string>('braintree.merchantId'),
       publicKey: this.configService.get<string>('braintree.publicKey'),

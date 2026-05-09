@@ -1,18 +1,15 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { TransactionType } from '@prisma/client';
 import {
   IPaymentProvider,
   DepositIntentResult,
 } from './interface/payment-provider.interface';
-import { ProviderResult } from '../dto';
+import { ProviderResult } from '../dto/provider-result.dto';
+import { ProviderConfigService } from './config/provider-config.service';
+import Stripe from 'stripe';
 
 /**
  * Stripe payment provider adapter.
- *
- * ## Current state (Step 1)
- * Method signatures implemented with stubs. Real Stripe SDK integration
- * happens in Steps 4-6.
  *
  * ## Deposit Flow (Stripe Financial Connections + ACH Direct Debit)
  * 1. createDepositIntent() → stripe.paymentIntents.create({ payment_method_types: ['us_bank_account'] })
@@ -31,60 +28,103 @@ import { ProviderResult } from '../dto';
  */
 @Injectable()
 export class StripeProvider implements IPaymentProvider {
+  private readonly stripe: Stripe.Stripe;
   private readonly logger = new Logger(StripeProvider.name);
 
-  constructor(private readonly configService: ConfigService) {}
+  constructor(private readonly configService: ProviderConfigService) {
+    const config = this.configService.StripeConfig;
+    if (!config) {
+      this.logger.warn(
+        'STRIPE_SECRET_KEY not configured — Stripe provider will fail on calls',
+      );
+    }
+
+    // Initialize Stripe SDK with API version pinned for stability
+    this.stripe = new Stripe(config.secretKey, {
+      apiVersion: '2026-04-22.dahlia',
+      typescript: true,
+    });
+  }
 
   // ── Deposit Intent ─────────────────────────────────────────────────────────
 
   /**
    * Creates a Stripe PaymentIntent for ACH bank account deposit.
    *
-   * Stub: Returns simulated client_secret. Real implementation in Step 5.
-   *
    * Expected payload:
-   *   { userId, amount, currency }
+   *   { userId, walletId, amount, currency }
    *
-   * Real SDK call (Step 5):
+   * SDK call:
    *   const intent = await stripe.paymentIntents.create({
-   *     amount: payload.amount * 100, // Stripe uses cents
-   *     currency: payload.currency,
+   *     amount: amount * 100, // Stripe uses cents
+   *     currency: currency,
    *     payment_method_types: ['us_bank_account'],
-   *     metadata: { userId: payload.userId }
+   *     metadata: { userId, walletId }
    *   });
-   *   return { success: true, clientSecret: intent.client_secret, intentId: intent.id };
    */
   async createDepositIntent(
     payload: Record<string, unknown>,
   ): Promise<DepositIntentResult> {
     try {
-      this.logger.log('Stripe stub — creating deposit intent', {
-        amount: payload['amount'],
-        currency: payload['currency'],
+      const amount = Number(payload['amount']);
+      const currency = String(payload['currency']).toLowerCase();
+      const userId = String(payload['userId']);
+      const walletId = String(payload['walletId']);
+
+      this.logger.log('Creating Stripe PaymentIntent for ACH deposit', {
+        amount,
+        currency,
+        userId,
       });
 
-      const simulatedIntentId = `pi_sim_${Date.now()}`;
-      const simulatedClientSecret = `${simulatedIntentId}_secret_sim`;
+      const intent = await this.stripe.paymentIntents.create({
+        amount: Math.round(amount * 100), // Convert to cents
+        currency,
+        payment_method_types: ['us_bank_account'],
+        metadata: {
+          userId,
+          walletId,
+          source: 'wallet_deposit',
+        },
+      });
+
+      this.logger.log('Stripe PaymentIntent created successfully', {
+        intentId: intent.id,
+        status: intent.status,
+      });
 
       return {
         success: true,
-        clientSecret: simulatedClientSecret,
-        intentId: simulatedIntentId,
+        clientSecret: intent.client_secret!,
+        intentId: intent.id,
         rawResponse: {
-          id: simulatedIntentId,
-          client_secret: simulatedClientSecret,
-          amount: payload['amount'],
-          currency: payload['currency'],
-          status: 'requires_payment_method',
+          id: intent.id,
+          client_secret: intent.client_secret,
+          amount: intent.amount,
+          currency: intent.currency,
+          status: intent.status,
         },
       };
     } catch (error) {
-      this.logger.error('Stripe createDepositIntent threw', { error, payload });
+      this.logger.error('Stripe createDepositIntent failed', {
+        error: error instanceof Error ? error.message : String(error),
+        payload,
+      });
+
       return {
         success: false,
         errorMessage:
-          error instanceof Error ? error.message : 'Unexpected Stripe error',
-        rawResponse: { error: String(error) },
+          error instanceof Stripe.errors.StripeError
+            ? error.message
+            : error instanceof Error
+              ? error.message
+              : 'Unexpected Stripe error',
+        rawResponse: {
+          error:
+            error instanceof Stripe.errors.StripeError
+              ? error.raw
+              : String(error),
+        },
       };
     }
   }
@@ -94,43 +134,74 @@ export class StripeProvider implements IPaymentProvider {
   /**
    * Confirms a deposit by verifying the PaymentIntent status.
    *
-   * Stub: Returns simulated success. Real implementation in Step 5.
-   *
    * Expected payload:
    *   { paymentIntentId, userId }
    *
-   * Real SDK call (Step 5):
-   *   const intent = await stripe.paymentIntents.retrieve(payload.paymentIntentId);
-   *   if (intent.status === 'succeeded') {
-   *     return { success: true, providerRef: intent.id, rawResponse: intent };
-   *   }
-   *   return { success: false, errorMessage: `Status: ${intent.status}`, rawResponse: intent };
+   * SDK call:
+   *   const intent = await stripe.paymentIntents.retrieve(paymentIntentId);
+   *   if (intent.status === 'succeeded') { success }
    */
   async confirmDeposit(
     payload: Record<string, unknown>,
   ): Promise<ProviderResult> {
     try {
-      this.logger.log('Stripe stub — confirming deposit', {
-        paymentIntentId: payload['paymentIntentId'],
+      const paymentIntentId = String(payload['paymentIntentId']);
+
+      this.logger.log('Confirming Stripe PaymentIntent', { paymentIntentId });
+
+      const intent = await this.stripe.paymentIntents.retrieve(paymentIntentId);
+
+      this.logger.log('Stripe PaymentIntent retrieved', {
+        intentId: intent.id,
+        status: intent.status,
       });
 
-      const simulatedRef = `pi_confirmed_${Date.now()}`;
+      // Check if payment succeeded
+      if (intent.status === 'succeeded') {
+        return {
+          success: true,
+          providerRef: intent.id,
+          rawResponse: {
+            id: intent.id,
+            status: intent.status,
+            amount: intent.amount,
+            currency: intent.currency,
+            payment_method: intent.payment_method,
+          },
+        };
+      }
+
+      // Payment not succeeded — treat as failure
       return {
-        success: true,
-        providerRef: simulatedRef,
+        success: false,
+        errorMessage: `PaymentIntent status is "${intent.status}" (expected "succeeded")`,
         rawResponse: {
-          id: simulatedRef,
-          status: 'succeeded',
-          paymentIntentId: payload['paymentIntentId'],
+          id: intent.id,
+          status: intent.status,
+          amount: intent.amount,
+          currency: intent.currency,
         },
       };
     } catch (error) {
-      this.logger.error('Stripe confirmDeposit threw', { error, payload });
+      this.logger.error('Stripe confirmDeposit failed', {
+        error: error instanceof Error ? error.message : String(error),
+        payload,
+      });
+
       return {
         success: false,
         errorMessage:
-          error instanceof Error ? error.message : 'Unexpected Stripe error',
-        rawResponse: { error: String(error) },
+          error instanceof Stripe.errors.StripeError
+            ? error.message
+            : error instanceof Error
+              ? error.message
+              : 'Unexpected Stripe error',
+        rawResponse: {
+          error:
+            error instanceof Stripe.errors.StripeError
+              ? error.raw
+              : String(error),
+        },
       };
     }
   }
@@ -140,45 +211,81 @@ export class StripeProvider implements IPaymentProvider {
   /**
    * Creates a payout to an external Stripe Connect Express account.
    *
-   * Stub: Returns simulated success. Real implementation in Step 6.
-   *
    * Expected payload:
    *   { userId, amount, currency, stripeConnectedAccountId }
    *
-   * Real SDK call (Step 6):
+   * SDK call:
    *   const payout = await stripe.payouts.create({
-   *     amount: payload.amount * 100,
-   *     currency: payload.currency,
-   *     destination: payload.stripeConnectedAccountId,
-   *     metadata: { userId: payload.userId }
+   *     amount: amount * 100,
+   *     currency: currency,
+   *     destination: stripeConnectedAccountId,
+   *     metadata: { userId }
    *   });
-   *   return { success: true, providerRef: payout.id, rawResponse: payout };
    */
-  async createPayout(payload: Record<string, unknown>): Promise<ProviderResult> {
+  async createPayout(
+    payload: Record<string, unknown>,
+  ): Promise<ProviderResult> {
     try {
-      this.logger.log('Stripe stub — creating payout', {
-        amount: payload['amount'],
-        currency: payload['currency'],
+      const amount = Number(payload['amount']);
+      const currency = String(payload['currency']).toLowerCase();
+      const userId = String(payload['userId']);
+      const stripeConnectedAccountId = String(
+        payload['stripeConnectedAccountId'],
+      );
+
+      this.logger.log('Creating Stripe payout', {
+        amount,
+        currency,
+        userId,
+        destination: stripeConnectedAccountId,
       });
 
-      const simulatedRef = `po_sim_${Date.now()}`;
+      const payout = await this.stripe.payouts.create({
+        amount: Math.round(amount * 100), // Convert to cents
+        currency,
+        destination: stripeConnectedAccountId,
+        metadata: {
+          userId,
+          source: 'wallet_withdrawal',
+        },
+      });
+
+      this.logger.log('Stripe payout created successfully', {
+        payoutId: payout.id,
+        status: payout.status,
+      });
+
       return {
         success: true,
-        providerRef: simulatedRef,
+        providerRef: payout.id,
         rawResponse: {
-          id: simulatedRef,
-          status: 'paid',
-          amount: payload['amount'],
-          currency: payload['currency'],
+          id: payout.id,
+          status: payout.status,
+          amount: payout.amount,
+          currency: payout.currency,
+          arrival_date: payout.arrival_date,
         },
       };
     } catch (error) {
-      this.logger.error('Stripe createPayout threw', { error, payload });
+      this.logger.error('Stripe createPayout failed', {
+        error: error instanceof Error ? error.message : String(error),
+        payload,
+      });
+
       return {
         success: false,
         errorMessage:
-          error instanceof Error ? error.message : 'Unexpected Stripe error',
-        rawResponse: { error: String(error) },
+          error instanceof Stripe.errors.StripeError
+            ? error.message
+            : error instanceof Error
+              ? error.message
+              : 'Unexpected Stripe error',
+        rawResponse: {
+          error:
+            error instanceof Stripe.errors.StripeError
+              ? error.raw
+              : String(error),
+        },
       };
     }
   }
