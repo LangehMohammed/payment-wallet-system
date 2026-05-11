@@ -9,6 +9,7 @@ import { PaymentRepository } from './payment.repository';
 import { StripeProvider } from './providers/stripe.provider';
 import { PaypalProvider } from './providers/paypal.provider';
 import { PaymentProviderRegistry } from './providers/registry/payment-provider.registry';
+import { ProviderConfigService } from './providers/config/provider-config.service';
 
 @Module({
   imports: [WalletModule],
@@ -21,6 +22,7 @@ import { PaymentProviderRegistry } from './providers/registry/payment-provider.r
     StripeProvider,
     PaypalProvider,
     PaymentProviderRegistry,
+    ProviderConfigService,
     AuditLogger,
   ],
   exports: [

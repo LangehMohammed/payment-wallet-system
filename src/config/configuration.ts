@@ -37,6 +37,7 @@ export default () => ({
     merchantId: process.env.BRAINTREE_MERCHANT_ID,
     publicKey: process.env.BRAINTREE_PUBLIC_KEY,
     privateKey: process.env.BRAINTREE_PRIVATE_KEY,
+    environment: process.env.BRAINTREE_ENVIRONMENT || 'sandbox',
   },
   stripe: {
     secretKey: process.env.STRIPE_SECRET_KEY,

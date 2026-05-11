@@ -1,18 +1,16 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { TransactionType } from '@prisma/client';
+import * as braintree from 'braintree';
 import {
   IPaymentProvider,
   DepositIntentResult,
 } from './interface/payment-provider.interface';
-import { ProviderResult } from '../dto';
+import { ProviderResult } from '../dto/provider-result.dto';
+import { ProviderConfigService } from './config/provider-config.service';
 
 /**
  * PayPal payment provider adapter (Braintree for deposits, PayPal Payouts for withdrawals).
- *
- * ## Current state (Step 1)
- * Method signatures implemented with stubs. Real Braintree + PayPal SDK
- * integration happens in Steps 7-9.
  *
  * ## Deposit Flow (Braintree + Vault)
  * 1. createDepositIntent() → braintree.clientToken.generate({ customerId })
@@ -24,6 +22,7 @@ import { ProviderResult } from '../dto';
  * ## Payout Flow (PayPal Payouts API)
  * 1. createPayout() → PayPal Payouts API call
  *    Requires merchant to have PayPal business account with Payouts enabled
+ *    NOTE: Currently stubbed — requires separate PayPal REST SDK (not Braintree)
  *
  * ## Error contract
  * All methods MUST NOT throw. Errors are caught and returned as
@@ -32,47 +31,81 @@ import { ProviderResult } from '../dto';
 @Injectable()
 export class PaypalProvider implements IPaymentProvider {
   private readonly logger = new Logger(PaypalProvider.name);
+  private readonly gateway: braintree.BraintreeGateway;
 
-  constructor(private readonly configService: ConfigService) {}
+  constructor(private readonly configService: ProviderConfigService) {
+    const config = this.configService.BraintreeConfig;
+
+    if (!config) {
+      this.logger.warn(
+        'Braintree credentials not configured — PayPal provider will fail on calls',
+      );
+    }
+
+    // Initialize Braintree Gateway
+    this.gateway = new braintree.BraintreeGateway({
+      environment:
+        config.environment === 'production'
+          ? braintree.Environment.Production
+          : braintree.Environment.Sandbox,
+      merchantId: config.merchantId,
+      publicKey: config.publicKey,
+      privateKey: config.privateKey,
+    });
+  }
 
   // ── Deposit Intent ─────────────────────────────────────────────────────────
 
   /**
    * Generates a Braintree client token for Drop-in UI initialization.
    *
-   * Stub: Returns simulated client_token. Real implementation in Step 8.
-   *
    * Expected payload:
-   *   { userId, customerId? } (customerId is Braintree's internal user ID if user has vaulted payments)
+   *   { userId, customerId? }
    *
-   * Real SDK call (Step 8):
-   *   const gateway = new braintree.BraintreeGateway({ ... });
+   * SDK call:
    *   const response = await gateway.clientToken.generate({
    *     customerId: payload.customerId // loads vaulted payment methods if present
    *   });
-   *   return { success: true, clientToken: response.clientToken };
+   *   return { clientToken: response.clientToken };
    */
   async createDepositIntent(
     payload: Record<string, unknown>,
   ): Promise<DepositIntentResult> {
     try {
-      this.logger.log('Braintree stub — generating client token', {
-        userId: payload['userId'],
-        customerId: payload['customerId'],
+      const customerId = payload['customerId'] as string | undefined;
+      const userId = String(payload['userId']);
+
+      this.logger.log('Generating Braintree client token', {
+        userId,
+        customerId,
       });
 
-      const simulatedToken = `bt_token_sim_${Date.now()}`;
+      const options: braintree.ClientTokenRequest = {};
+      if (customerId) {
+        // If customerId exists, Braintree will load vaulted payment methods
+        options.customerId = customerId;
+      }
+
+      const response = await this.gateway.clientToken.generate(options);
+
+      this.logger.log('Braintree client token generated successfully', {
+        userId,
+      });
 
       return {
         success: true,
-        clientToken: simulatedToken,
+        clientToken: response.clientToken,
         rawResponse: {
-          clientToken: simulatedToken,
-          customerId: payload['customerId'],
+          clientToken: response.clientToken,
+          customerId: customerId || null,
         },
       };
     } catch (error) {
-      this.logger.error('Braintree createDepositIntent threw', { error, payload });
+      this.logger.error('Braintree createDepositIntent failed', {
+        error: error instanceof Error ? error.message : String(error),
+        payload,
+      });
+
       return {
         success: false,
         errorMessage:
@@ -87,48 +120,91 @@ export class PaypalProvider implements IPaymentProvider {
   /**
    * Executes a Braintree sale with payment nonce and vaults the payment method.
    *
-   * Stub: Returns simulated success. Real implementation in Step 8.
-   *
    * Expected payload:
    *   { nonce, amount, currency, userId, customerId? }
    *
-   * Real SDK call (Step 8):
+   * SDK call:
    *   const result = await gateway.transaction.sale({
    *     amount: payload.amount,
    *     paymentMethodNonce: payload.nonce,
-   *     options: {
-   *       storeInVaultOnSuccess: true,
-   *       submitForSettlement: true
-   *     },
-   *     customerId: payload.customerId // or create new customer if absent
+   *     options: { storeInVaultOnSuccess: true, submitForSettlement: true },
+   *     customerId: payload.customerId
    *   });
-   *   if (result.success) {
-   *     return { success: true, providerRef: result.transaction.id, rawResponse: result.transaction };
-   *   }
-   *   return { success: false, errorMessage: result.message, rawResponse: result };
    */
   async confirmDeposit(
     payload: Record<string, unknown>,
   ): Promise<ProviderResult> {
     try {
-      this.logger.log('Braintree stub — confirming deposit', {
-        nonce: payload['nonce'],
-        amount: payload['amount'],
+      const nonce = String(payload['nonce']);
+      const amount = String(payload['amount']);
+      const currency = String(payload['currency']);
+      const userId = String(payload['userId']);
+      const customerId = payload['customerId'] as string | undefined;
+
+      this.logger.log('Executing Braintree transaction.sale', {
+        amount,
+        currency,
+        userId,
+        hasCustomerId: !!customerId,
       });
 
-      const simulatedRef = `bt_txn_${Date.now()}`;
+      const saleRequest: braintree.TransactionRequest = {
+        amount,
+        paymentMethodNonce: nonce,
+        options: {
+          storeInVaultOnSuccess: true, // Vault PayPal account for future use
+          submitForSettlement: true, // Auto-settle (no separate capture step)
+        },
+      };
+
+      // If customerId exists, associate transaction with that customer
+      if (customerId) {
+        saleRequest.customerId = customerId;
+      }
+
+      const result = await this.gateway.transaction.sale(saleRequest);
+
+      if (result.success && result.transaction) {
+        this.logger.log('Braintree transaction succeeded', {
+          transactionId: result.transaction.id,
+          status: result.transaction.status,
+        });
+
+        return {
+          success: true,
+          providerRef: result.transaction.id,
+          rawResponse: {
+            id: result.transaction.id,
+            status: result.transaction.status,
+            amount: result.transaction.amount,
+            currency: result.transaction.currencyIsoCode,
+            payment_method: result.transaction.paymentInstrumentType,
+          },
+        };
+      }
+
+      // Transaction failed
+      this.logger.warn('Braintree transaction failed', {
+        message: result.message,
+        errors: result.errors?.deepErrors(),
+      });
+
       return {
-        success: true,
-        providerRef: simulatedRef,
+        success: false,
+        errorMessage: result.message || 'Braintree transaction failed',
         rawResponse: {
-          id: simulatedRef,
-          status: 'settled',
-          amount: payload['amount'],
-          currency: payload['currency'],
+          id: result.transaction.id,
+          status: result.transaction.status,
+          amount: result.transaction.amount,
+          currency: result.transaction.currencyIsoCode,
         },
       };
     } catch (error) {
-      this.logger.error('Braintree confirmDeposit threw', { error, payload });
+      this.logger.error('Braintree confirmDeposit threw', {
+        error: error instanceof Error ? error.message : String(error),
+        payload,
+      });
+
       return {
         success: false,
         errorMessage:
@@ -143,30 +219,36 @@ export class PaypalProvider implements IPaymentProvider {
   /**
    * Creates a payout via PayPal Payouts API.
    *
-   * Stub: Returns simulated success. Real implementation in Step 9.
+   * STUB: PayPal Payouts require a separate SDK (@paypal/payouts-sdk or REST API).
+   * Braintree does NOT handle outbound payouts — only inbound payments (deposits).
    *
    * Expected payload:
    *   { userId, amount, currency, paypalEmail }
    *
-   * Real SDK call (Step 9):
-   *   const payoutBatch = await paypal.payouts.create({
+   * Real implementation (Step 9):
+   *   const paypal = require('@paypal/payouts-sdk');
+   *   const request = new paypal.payouts.PayoutsPostRequest();
+   *   request.requestBody({
    *     sender_batch_header: { ... },
-   *     items: [{
-   *       recipient_type: 'EMAIL',
-   *       amount: { value: payload.amount, currency: payload.currency },
-   *       receiver: payload.paypalEmail
-   *     }]
+   *     items: [{ recipient_type: 'EMAIL', receiver: paypalEmail, amount: { ... } }]
    *   });
-   *   return { success: true, providerRef: payoutBatch.batch_header.payout_batch_id, rawResponse: payoutBatch };
+   *   const response = await client.execute(request);
    */
-  async createPayout(payload: Record<string, unknown>): Promise<ProviderResult> {
+  async createPayout(
+    payload: Record<string, unknown>,
+  ): Promise<ProviderResult> {
     try {
-      this.logger.log('PayPal stub — creating payout', {
-        amount: payload['amount'],
-        currency: payload['currency'],
-        paypalEmail: payload['paypalEmail'],
+      const amount = payload['amount'];
+      const currency = payload['currency'];
+      const paypalEmail = payload['paypalEmail'];
+
+      this.logger.log('PayPal payout stub — simulating success', {
+        amount,
+        currency,
+        paypalEmail,
       });
 
+      // TODO: Replace with real PayPal Payouts SDK integration (Step 9)
       const simulatedRef = `paypal_payout_${Date.now()}`;
       return {
         success: true,
@@ -174,12 +256,17 @@ export class PaypalProvider implements IPaymentProvider {
         rawResponse: {
           batch_id: simulatedRef,
           status: 'SUCCESS',
-          amount: payload['amount'],
-          currency: payload['currency'],
+          amount,
+          currency,
+          recipient_email: paypalEmail,
         },
       };
     } catch (error) {
-      this.logger.error('PayPal createPayout threw', { error, payload });
+      this.logger.error('PayPal createPayout threw', {
+        error: error instanceof Error ? error.message : String(error),
+        payload,
+      });
+
       return {
         success: false,
         errorMessage:

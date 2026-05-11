@@ -79,19 +79,27 @@ export const configValidationSchema = Joi.object({
     }),
 
   // Third-Party Providers
+  // Braintree Provider (PayPal)
   BRAINTREE_MERCHANT_ID: Joi.string().when('ENV', {
     is: 'production',
     then: Joi.required(),
+    otherwise: Joi.optional(),
   }),
   BRAINTREE_PUBLIC_KEY: Joi.string().when('ENV', {
     is: 'production',
     then: Joi.required(),
+    otherwise: Joi.optional(),
   }),
   BRAINTREE_PRIVATE_KEY: Joi.string().when('ENV', {
     is: 'production',
     then: Joi.required(),
+    otherwise: Joi.optional(),
   }),
+  BRAINTREE_ENVIRONMENT: Joi.string()
+    .valid('sandbox', 'production')
+    .default('sandbox'),
 
+  // Stripe Provider
   STRIPE_SECRET_KEY: Joi.string().when('ENV', {
     is: 'production',
     then: Joi.required(),

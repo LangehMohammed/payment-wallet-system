@@ -17,6 +17,7 @@ export class ProviderConfigService {
       merchantId: this.configService.get<string>('braintree.merchantId'),
       publicKey: this.configService.get<string>('braintree.publicKey'),
       privateKey: this.configService.get<string>('braintree.privateKey'),
+      environment: this.configService.get<string>('braintree.environment'),
     };
   }
 }
