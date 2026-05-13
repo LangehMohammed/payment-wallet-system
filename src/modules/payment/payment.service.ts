@@ -1,7 +1,7 @@
 import {
   Injectable,
   Logger,
-  ConflictException,
+  NotFoundException,
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { Prisma, Provider, TransactionStatus } from '@prisma/client';
@@ -52,7 +52,7 @@ export class PaymentService {
     // Validate user has an active wallet
     const wallet = await this.walletRepository.findByUserId(userId);
     if (!wallet) {
-      throw new ConflictException('Wallet not found');
+      throw new NotFoundException('Wallet not found');
     }
 
     this.walletRepository.assertActive(wallet);
@@ -119,8 +119,11 @@ export class PaymentService {
     const amount = new Prisma.Decimal(dto.amount);
 
     const result = await this.prisma.$transaction(async (tx) => {
-      // Lock wallet row — prevents concurrent deposit/withdrawal races
+      // Lock wallet row — wallet fetch and lock happen together atomically
+      // to prevent TOCTOU: no gap between reading and locking the wallet.
       const wallet = await this.walletRepository.findByUserId(userId);
+      if (!wallet) throw new NotFoundException('Wallet not found');
+
       const locked = await this.walletRepository.lockWallet(wallet.id, tx);
 
       this.walletRepository.assertActive(locked);
@@ -229,8 +232,11 @@ export class PaymentService {
     const amount = new Prisma.Decimal(dto.amount);
 
     const result = await this.prisma.$transaction(async (tx) => {
-      // Lock wallet row — prevents concurrent races
+      // Lock wallet row — wallet fetch and lock happen together atomically
+      // to prevent TOCTOU: no gap between reading and locking the wallet.
       const wallet = await this.walletRepository.findByUserId(userId);
+      if (!wallet) throw new NotFoundException('Wallet not found');
+
       const locked = await this.walletRepository.lockWallet(wallet.id, tx);
 
       this.walletRepository.assertActive(locked);

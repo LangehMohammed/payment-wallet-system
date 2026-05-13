@@ -3,12 +3,7 @@ import {
   Logger,
   UnprocessableEntityException,
 } from '@nestjs/common';
-import {
-  Currency,
-  Provider,
-  TransactionStatus,
-  TransactionType,
-} from '@prisma/client';
+import { Provider, TransactionStatus, TransactionType } from '@prisma/client';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '@app/prisma/prisma.service';
 import { AuditLogger } from '@app/common/audit/audit-logger.service';
@@ -87,13 +82,18 @@ export class PaymentSettlementService {
       }
     });
 
-    void this.audit.log('DEPOSIT_SETTLED', {
-      meta: {
-        transactionId: txCtx.id,
-        type: txCtx.type,
-        providerRef: result.providerRef,
+    void this.audit.log(
+      txCtx.type === TransactionType.DEPOSIT
+        ? 'DEPOSIT_SETTLED'
+        : 'WITHDRAWAL_SETTLED',
+      {
+        meta: {
+          transactionId: txCtx.id,
+          type: txCtx.type,
+          providerRef: result.providerRef,
+        },
       },
-    });
+    );
   }
 
   // ── Fail ───────────────────────────────────────────────────────────────────
@@ -131,13 +131,18 @@ export class PaymentSettlementService {
       }
     });
 
-    void this.audit.warn('DEPOSIT_FAILED', {
-      meta: {
-        transactionId: txCtx.id,
-        type: txCtx.type,
-        errorMessage: result.errorMessage,
+    void this.audit.warn(
+      txCtx.type === TransactionType.DEPOSIT
+        ? 'DEPOSIT_FAILED'
+        : 'WITHDRAWAL_FAILED',
+      {
+        meta: {
+          transactionId: txCtx.id,
+          type: txCtx.type,
+          errorMessage: result.errorMessage,
+        },
       },
-    });
+    );
   }
 
   // ── Private — settle paths ─────────────────────────────────────────────────
@@ -179,7 +184,7 @@ export class PaymentSettlementService {
         transactionId: txCtx.id,
         direction: 'CREDIT',
         amount: txCtx.amount,
-        currency: txCtx.currency as Currency,
+        currency: txCtx.currency as any,
         balanceAfter: availableBalanceAfter,
       },
     });
