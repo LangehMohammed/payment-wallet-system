@@ -8,6 +8,7 @@ import {
 } from './interface/payment-provider.interface';
 import { ProviderResult } from '../dto/provider-result.dto';
 import { ProviderConfigService } from './config/provider-config.service';
+import { PaypalTokenClient } from './paypal-token.client';
 
 /**
  * PayPal payment provider adapter (Braintree for deposits, PayPal Payouts for withdrawals).
@@ -33,24 +34,32 @@ export class PaypalProvider implements IPaymentProvider {
   private readonly logger = new Logger(PaypalProvider.name);
   private readonly gateway: braintree.BraintreeGateway;
 
-  constructor(private readonly configService: ProviderConfigService) {
-    const config = this.configService.BraintreeConfig;
+  constructor(private readonly configService: ProviderConfigService, private readonly tokenClient: PaypalTokenClient) {
+    const braintreeConfig = this.configService.BraintreeConfig;
+    const paypalConfig = this.configService.PaypalConfig;
 
-    if (!config) {
+
+    if (!braintreeConfig) {
       this.logger.warn(
         'Braintree credentials not configured — PayPal provider will fail on calls',
+      );
+    }
+
+    if (!paypalConfig) {
+      this.logger.warn(
+        'PayPal credentials not configured — PayPal payout functionality will fail',
       );
     }
 
     // Initialize Braintree Gateway
     this.gateway = new braintree.BraintreeGateway({
       environment:
-        config.environment === 'production'
+        braintreeConfig.environment === 'production'
           ? braintree.Environment.Production
           : braintree.Environment.Sandbox,
-      merchantId: config.merchantId,
-      publicKey: config.publicKey,
-      privateKey: config.privateKey,
+      merchantId: braintreeConfig.merchantId,
+      publicKey: braintreeConfig.publicKey,
+      privateKey: braintreeConfig.privateKey,
     });
   }
 
@@ -215,58 +224,125 @@ export class PaypalProvider implements IPaymentProvider {
   }
 
   // ── Payout ─────────────────────────────────────────────────────────────────
-
+ 
   /**
-   * Creates a payout via PayPal Payouts API.
+   * Creates a payout via PayPal Payouts REST API (POST /v1/payments/payouts).
    *
-   * STUB: PayPal Payouts require a separate SDK (@paypal/payouts-sdk or REST API).
-   * Braintree does NOT handle outbound payouts — only inbound payments (deposits).
+   * Authentication: OAuth2 client credentials via PaypalTokenClient.
+   * Token is cached in-process and refreshed automatically before expiry.
    *
-   * Expected payload:
-   *   { userId, amount, currency, paypalEmail }
+   * Expected payload: { userId, walletId, amount, currency, paypalEmail }
    *
-   * Real implementation (Step 9):
-   *   const paypal = require('@paypal/payouts-sdk');
-   *   const request = new paypal.payouts.PayoutsPostRequest();
-   *   request.requestBody({
-   *     sender_batch_header: { ... },
-   *     items: [{ recipient_type: 'EMAIL', receiver: paypalEmail, amount: { ... } }]
-   *   });
-   *   const response = await client.execute(request);
+   * ## Payout batch vs. single item
+   * The Payouts API creates a batch containing one item.
+   * Single-item batches are standard practice for per-transaction payouts.
+   * The batch_id is stored as providerRef for reconciliation.
+   *
+   * ## Async nature of PayPal payouts
+   * Payouts are not synchronous — PayPal processes them asynchronously.
+   * The API returns PENDING immediately and sends webhook notifications
+   * (PAYMENT.PAYOUTSBATCH.PROCESSING, PAYMENT.PAYOUTSBATCH.SUCCESS, etc.)
+   * when the batch completes. The webhook module (Step 12) will handle
+   * final settlement confirmation.
+   *
+   * For now: success = batch accepted by PayPal (not yet delivered to recipient).
    */
-  async createPayout(
-    payload: Record<string, unknown>,
-  ): Promise<ProviderResult> {
+  async createPayout(payload: Record<string, unknown>): Promise<ProviderResult> {
     try {
-      const amount = payload['amount'];
-      const currency = payload['currency'];
-      const paypalEmail = payload['paypalEmail'];
-
-      this.logger.log('PayPal payout stub — simulating success', {
+      const amount = String(payload['amount']);
+      const currency = String(payload['currency']).toUpperCase();
+      const paypalEmail = String(payload['paypalEmail']);
+      const userId = String(payload['userId']);
+      const walletId = String(payload['walletId']);
+ 
+      this.logger.log('Creating PayPal payout via REST API', {
         amount,
         currency,
-        paypalEmail,
+        userId,
+        recipientEmail: paypalEmail,
       });
-
-      // TODO: Replace with real PayPal Payouts SDK integration (Step 9)
-      const simulatedRef = `paypal_payout_${Date.now()}`;
+ 
+      const environment = this.configService.PaypalConfig.environment;
+      const baseUrl =
+        environment === 'production'
+          ? 'https://api-m.paypal.com'
+          : 'https://api-m.sandbox.paypal.com';
+ 
+      // Fetch OAuth2 token (cached, refreshed automatically)
+      const accessToken = await this.tokenClient.getAccessToken();
+ 
+      // Unique sender_batch_id prevents duplicate payout submissions
+      // on network retries — includes userId + timestamp for traceability
+      const senderBatchId = `wallet_${walletId}_${Date.now()}`;
+ 
+      const requestBody = {
+        sender_batch_header: {
+          sender_batch_id: senderBatchId,
+          recipient_type: 'EMAIL',
+          email_subject: 'You have received a payout',
+          email_message: 'Your wallet withdrawal has been processed.',
+        },
+        items: [
+          {
+            amount: {
+              value: amount,
+              currency,
+            },
+            receiver: paypalEmail,
+            note: 'Wallet withdrawal',
+            sender_item_id: `${userId}_${Date.now()}`,
+          },
+        ],
+      };
+ 
+      const response = await fetch(`${baseUrl}/v1/payments/payouts`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
+      });
+ 
+      const responseBody = (await response.json()) as Record<string, unknown>;
+ 
+      if (!response.ok) {
+        this.logger.warn('PayPal Payouts API returned error', {
+          status: response.status,
+          body: responseBody,
+        });
+ 
+        return {
+          success: false,
+          errorMessage:
+            (responseBody['message'] as string) ??
+            `PayPal Payouts API error: ${response.status}`,
+          rawResponse: responseBody,
+        };
+      }
+ 
+      // Extract batch_header from response
+      const batchHeader = responseBody['batch_header'] as Record<string, unknown>;
+      const payoutBatchId = batchHeader?.['payout_batch_id'] as string;
+      const batchStatus = batchHeader?.['batch_status'] as string;
+ 
+      this.logger.log('PayPal payout batch created successfully', {
+        payoutBatchId,
+        batchStatus,
+        senderBatchId,
+      });
+ 
       return {
         success: true,
-        providerRef: simulatedRef,
-        rawResponse: {
-          batch_id: simulatedRef,
-          status: 'SUCCESS',
-          amount,
-          currency,
-          recipient_email: paypalEmail,
-        },
+        providerRef: payoutBatchId,
+        rawResponse: responseBody,
       };
     } catch (error) {
       this.logger.error('PayPal createPayout threw', {
         error: error instanceof Error ? error.message : String(error),
         payload,
       });
-
+ 
       return {
         success: false,
         errorMessage:

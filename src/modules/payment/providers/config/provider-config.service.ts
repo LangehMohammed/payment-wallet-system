@@ -20,4 +20,12 @@ export class ProviderConfigService {
       environment: this.configService.get<string>('braintree.environment'),
     };
   }
+
+  get PaypalConfig() {
+    return {
+      clientId: this.configService.get<string>('paypal.clientId'),
+      clientSecret: this.configService.get<string>('paypal.clientSecret'),
+      environment: this.configService.get<string>('paypal.environment'),
+    };
+  }
 }

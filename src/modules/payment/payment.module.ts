@@ -10,6 +10,7 @@ import { StripeProvider } from './providers/stripe.provider';
 import { PaypalProvider } from './providers/paypal.provider';
 import { PaymentProviderRegistry } from './providers/registry/payment-provider.registry';
 import { ProviderConfigService } from './providers/config/provider-config.service';
+import { PaypalTokenClient } from './providers/paypal-token.client';
 
 @Module({
   imports: [WalletModule],
@@ -21,6 +22,7 @@ import { ProviderConfigService } from './providers/config/provider-config.servic
     PaymentRepository,
     StripeProvider,
     PaypalProvider,
+    PaypalTokenClient,
     PaymentProviderRegistry,
     ProviderConfigService,
     AuditLogger,
@@ -30,6 +32,7 @@ import { ProviderConfigService } from './providers/config/provider-config.servic
     PaymentRepository,
     StripeProvider,
     PaypalProvider,
+    PaypalTokenClient,
     PaymentProviderRegistry,
   ],
 })

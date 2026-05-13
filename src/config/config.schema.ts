@@ -83,19 +83,29 @@ export const configValidationSchema = Joi.object({
   BRAINTREE_MERCHANT_ID: Joi.string().when('ENV', {
     is: 'production',
     then: Joi.required(),
-    otherwise: Joi.optional(),
   }),
   BRAINTREE_PUBLIC_KEY: Joi.string().when('ENV', {
     is: 'production',
     then: Joi.required(),
-    otherwise: Joi.optional(),
   }),
   BRAINTREE_PRIVATE_KEY: Joi.string().when('ENV', {
     is: 'production',
     then: Joi.required(),
-    otherwise: Joi.optional(),
   }),
   BRAINTREE_ENVIRONMENT: Joi.string()
+    .valid('sandbox', 'production')
+    .default('sandbox'),
+
+  // PayPal Provider
+  PAYPAL_CLIENT_ID: Joi.string().when('ENV', {
+    is: 'production',
+    then: Joi.required(),
+  }),
+  PAYPAL_CLIENT_SECRET: Joi.string().when('ENV', {
+    is: 'production',
+    then: Joi.required(),
+  }),
+  PAYPAL_ENVIRONMENT: Joi.string()
     .valid('sandbox', 'production')
     .default('sandbox'),
 
