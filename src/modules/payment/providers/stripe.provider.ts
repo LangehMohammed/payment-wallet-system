@@ -15,12 +15,22 @@ import Stripe from 'stripe';
  * 1. createDepositIntent() → stripe.paymentIntents.create({ payment_method_types: ['us_bank_account'] })
  *    Returns client_secret for frontend stripe.confirmUsBankAccountPayment()
  * 2. Frontend: User authenticates bank via Financial Connections modal
- * 3. confirmDeposit() → stripe.paymentIntents.retrieve() to verify status
- *    Returns success if status === 'succeeded'
+ * 3. Processor calls confirmDeposit() → transitions PaymentIntent to processing state
+ *    Returns requiresWebhook: true — ACH settlement is async (1-4 business days)
+ * 4. Webhook receives payment_intent.succeeded / payment_intent.payment_failed → settles
  *
  * ## Payout Flow (Stripe Connect Express + Instant Payouts)
- * 1. createPayout() → stripe.payouts.create({ amount, currency, destination: connectedAccountId })
- *    Requires merchant to have Stripe Connect Express account linked
+ * 1. Processor calls createPayout() → stripe.payouts.create()
+ *    Returns requiresWebhook: true — payout delivery is async
+ * 2. Webhook receives payout.paid / payout.failed → settles
+ *
+ * ## requiresWebhook contract
+ * Both methods return requiresWebhook: true because Stripe settlement is always
+ * asynchronous. The processor marks the outbox event delivered and exits.
+ * The webhook module drives all balance mutations.
+ *
+ * Exception: if the provider call itself fails (network error, invalid params),
+ * success: false is returned without requiresWebhook — the processor calls .fail().
  *
  * ## Error contract
  * All methods MUST NOT throw. Errors are caught and returned as
@@ -39,7 +49,6 @@ export class StripeProvider implements IPaymentProvider {
       );
     }
 
-    // Initialize Stripe SDK with API version pinned for stability
     this.stripe = new Stripe(config.secretKey, {
       apiVersion: '2026-04-22.dahlia',
       typescript: true,
@@ -53,14 +62,6 @@ export class StripeProvider implements IPaymentProvider {
    *
    * Expected payload:
    *   { userId, walletId, amount, currency }
-   *
-   * SDK call:
-   *   const intent = await stripe.paymentIntents.create({
-   *     amount: amount * 100, // Stripe uses cents
-   *     currency: currency,
-   *     payment_method_types: ['us_bank_account'],
-   *     metadata: { userId, walletId }
-   *   });
    */
   async createDepositIntent(
     payload: Record<string, unknown>,
@@ -78,7 +79,7 @@ export class StripeProvider implements IPaymentProvider {
       });
 
       const intent = await this.stripe.paymentIntents.create({
-        amount: Math.round(amount * 100), // Convert to cents
+        amount: Math.round(amount * 100),
         currency,
         payment_method_types: ['us_bank_account'],
         metadata: {
@@ -132,14 +133,10 @@ export class StripeProvider implements IPaymentProvider {
   // ── Deposit Confirmation ───────────────────────────────────────────────────
 
   /**
-   * Confirms a deposit by verifying the PaymentIntent status.
+   * Confirms a Stripe ACH deposit by verifying the PaymentIntent can proceed.
    *
    * Expected payload:
    *   { paymentIntentId, userId }
-   *
-   * SDK call:
-   *   const intent = await stripe.paymentIntents.retrieve(paymentIntentId);
-   *   if (intent.status === 'succeeded') { success }
    */
   async confirmDeposit(
     payload: Record<string, unknown>,
@@ -147,7 +144,9 @@ export class StripeProvider implements IPaymentProvider {
     try {
       const paymentIntentId = String(payload['paymentIntentId']);
 
-      this.logger.log('Confirming Stripe PaymentIntent', { paymentIntentId });
+      this.logger.log('Confirming Stripe PaymentIntent (ACH — async)', {
+        paymentIntentId,
+      });
 
       const intent = await this.stripe.paymentIntents.retrieve(paymentIntentId);
 
@@ -156,25 +155,26 @@ export class StripeProvider implements IPaymentProvider {
         status: intent.status,
       });
 
-      // Check if payment succeeded
-      if (intent.status === 'succeeded') {
+      if (
+        intent.status === 'canceled' ||
+        intent.status === 'requires_payment_method'
+      ) {
         return {
-          success: true,
-          providerRef: intent.id,
+          success: false,
+          errorMessage: `PaymentIntent is in terminal failure state: "${intent.status}"`,
           rawResponse: {
             id: intent.id,
             status: intent.status,
             amount: intent.amount,
             currency: intent.currency,
-            payment_method: intent.payment_method,
           },
         };
       }
 
-      // Payment not succeeded — treat as failure
       return {
-        success: false,
-        errorMessage: `PaymentIntent status is "${intent.status}" (expected "succeeded")`,
+        success: true,
+        requiresWebhook: true,
+        providerRef: intent.id,
         rawResponse: {
           id: intent.id,
           status: intent.status,
@@ -213,14 +213,6 @@ export class StripeProvider implements IPaymentProvider {
    *
    * Expected payload:
    *   { userId, amount, currency, stripeConnectedAccountId }
-   *
-   * SDK call:
-   *   const payout = await stripe.payouts.create({
-   *     amount: amount * 100,
-   *     currency: currency,
-   *     destination: stripeConnectedAccountId,
-   *     metadata: { userId }
-   *   });
    */
   async createPayout(
     payload: Record<string, unknown>,
@@ -241,7 +233,7 @@ export class StripeProvider implements IPaymentProvider {
       });
 
       const payout = await this.stripe.payouts.create({
-        amount: Math.round(amount * 100), // Convert to cents
+        amount: Math.round(amount * 100),
         currency,
         destination: stripeConnectedAccountId,
         metadata: {
@@ -250,13 +242,14 @@ export class StripeProvider implements IPaymentProvider {
         },
       });
 
-      this.logger.log('Stripe payout created successfully', {
+      this.logger.log('Stripe payout created — awaiting webhook confirmation', {
         payoutId: payout.id,
         status: payout.status,
       });
 
       return {
         success: true,
+        requiresWebhook: true,
         providerRef: payout.id,
         rawResponse: {
           id: payout.id,
@@ -290,7 +283,7 @@ export class StripeProvider implements IPaymentProvider {
     }
   }
 
-  // ── Unified Process (Backwards Compatibility) ──────────────────────────────
+  // ── Unified Process ────────────────────────────────────────────────────────
 
   /**
    * Routes to confirmDeposit() or createPayout() based on transaction type.

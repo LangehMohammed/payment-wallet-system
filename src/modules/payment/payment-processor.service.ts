@@ -16,32 +16,38 @@ const PROCESSOR_LOCK_KEY = 'locks:payment_processor';
 const PROCESSOR_LOCK_TTL_SECONDS = 15 * 60; // 15 minutes
 
 /**
- * Scheduled outbox consumer — polls pending OutboxEvents and processes them
+ * Scheduled outbox consumer — polls pending OutboxEvents and initiates them
  * through external payment providers.
  *
- * ## Flow
- * Every 30 seconds (configurable via @Cron):
- *   1. Acquire a distributed Redis lock to prevent concurrent processing.
- *   2. Fetch up to 100 pending provider events (DEPOSIT_INITIATED, WITHDRAWAL_INITIATED).
- *   3. For each event (sequential, not parallel):
- *      a. Resolve the provider adapter from transaction.provider.
- *      b. Call provider.process(event.payload).
- *      c. On success → settle (balance mutation + status → SETTLED + PaymentLog).
- *      d. On failure → fail (balance reversal + status → FAILED + PaymentLog).
- *      e. On exception → increment retryCount (max 5, then dead letter).
+ * ## Responsibility: INITIATE, not settle
+ * The processor calls the provider and then branches on the result:
+ *   - Braintree (sync):  result is final → call PaymentSettlementService.settle()
+ *                        or .fail() immediately.
+ *   - Stripe/PayPal (async): provider accepted the request but outcome is pending
+ *                        → mark OutboxEvent delivered and exit.
+ *                        The webhook module receives the authoritative status
+ *                        and drives settlement.
  *
- * ## Concurrency control
- * The Redis lock ensures only one instance processes the outbox at a time.
- * Events are processed sequentially to avoid DB contention on wallet rows.
+ * ## Decision matrix (from ProviderResult)
+ *   requiresWebhook: true  + success: true  → markDelivered, await webhook
+ *   requiresWebhook: true  + success: false → provider rejected synchronously
+ *                                             before async processing → .fail()
+ *   requiresWebhook: false + success: true  → .settle() immediately
+ *   requiresWebhook: false + success: false → .fail() immediately
+ *
+ * ## Flow
+ * Every 30 seconds:
+ *   1. Acquire distributed Redis lock (prevents concurrent processing).
+ *   2. Fetch up to 100 pending provider events (DEPOSIT_INITIATED, WITHDRAWAL_INITIATED).
+ *   3. For each event (sequential — avoids DB contention on wallet rows):
+ *      a. Resolve provider adapter from transaction.provider.
+ *      b. Call provider.process(payload, transactionType).
+ *      c. Branch on requiresWebhook + success (see above).
+ *      d. On exception → incrementRetry (max 5, then dead letter).
  *
  * ## Retry strategy
- * Linear retry count (no backoff yet). Events with retryCount >= 5 are filtered
- * out by `findPendingProviderEvents` and require manual intervention (DLQ sweep).
- *
- * ## Error boundaries
- * - Provider throws → catch → incrementRetry → event stays pending.
- * - Settlement write fails → transaction rolls back → incrementRetry → event stays pending.
- * - Lock unavailable → skip cycle → next poll in 30s.
+ * Linear retry count (no backoff). Events with retryCount >= 5 are filtered out
+ * by findPendingProviderEvents and require manual intervention.
  */
 @Injectable()
 export class PaymentProcessorService {
@@ -54,11 +60,7 @@ export class PaymentProcessorService {
     @Inject('REDIS_CLIENT') private readonly redis: Redis,
   ) {}
 
-  /**
-   * Scheduled task that runs every 30 seconds to process pending provider events.
-   * Uses a distributed lock in Redis to ensure only one instance performs processing.
-   */
-  @Cron('*/30 * * * * *') // Every 30 seconds
+  @Cron('*/30 * * * * *')
   async processOutbox(): Promise<void> {
     const acquired = await this.redis.set(
       PROCESSOR_LOCK_KEY,
@@ -86,10 +88,6 @@ export class PaymentProcessorService {
 
   // ── Private ────────────────────────────────────────────────────────────────
 
-  /**
-   * Fetches and processes a batch of pending outbox events.
-   * Sequential processing — no parallel execution to avoid wallet lock contention.
-   */
   private async processBatch(): Promise<void> {
     const events = await this.paymentRepository.findPendingProviderEvents(100);
 
@@ -108,17 +106,21 @@ export class PaymentProcessorService {
   }
 
   /**
-   * Processes a single outbox event through the provider and settlement flow.
+   * Processes a single outbox event.
+   *
+   * Branches on ProviderResult.requiresWebhook to determine whether to
+   * settle immediately (Braintree) or defer to the webhook module (Stripe/PayPal).
    *
    * Error handling:
-   *   - Provider throws → catch → incrementRetry.
-   *   - Settlement throws → catch → incrementRetry.
-   *   - Provider returns { success: false } → fail transaction.
-   *   - Provider returns { success: true } → settle transaction.
+   *   - Provider throws                          → incrementRetry
+   *   - requiresWebhook: true  + success: true   → markDelivered (webhook settles)
+   *   - requiresWebhook: true  + success: false  → .fail() (provider rejected sync)
+   *   - requiresWebhook: false + success: true   → .settle()
+   *   - requiresWebhook: false + success: false  → .fail()
+   *   - Settlement/fail throws                   → incrementRetry
    */
   private async processEvent(event: any): Promise<void> {
     try {
-      // Fetch the associated transaction
       const transaction = await this.paymentRepository.findTransactionById(
         event.transactionId,
       );
@@ -141,10 +143,8 @@ export class PaymentProcessorService {
         return;
       }
 
-      // Resolve the provider adapter
       const provider = this.providerRegistry.resolve(transaction.provider);
 
-      // Call the provider
       this.logger.log('Calling provider', {
         provider: transaction.provider,
         transactionId: transaction.id,
@@ -152,21 +152,44 @@ export class PaymentProcessorService {
         eventId: event.id,
       });
 
-      // Pass transactionType to provider.process() for routing
       const result = await provider.process(
         event.payload as Record<string, unknown>,
         transaction.type,
       );
 
-      // Route based on provider result
-      if (result.success) {
+      if (result.requiresWebhook && result.success) {
+        // Async provider accepted the request — webhook drives settlement.
+        // Mark the outbox event delivered so it is not picked up again.
+        await this.paymentRepository.markDelivered(event.id);
+        this.logger.log(
+          'Provider accepted (async) — outbox marked delivered, awaiting webhook',
+          {
+            provider: transaction.provider,
+            transactionId: transaction.id,
+            providerRef: result.providerRef,
+          },
+        );
+      } else if (result.requiresWebhook && !result.success) {
+        // Async provider rejected the request before processing began
+        // (e.g. invalid account, insufficient merchant funds).
+        // No webhook will arrive — fail immediately.
+        this.logger.warn(
+          'Async provider rejected request synchronously — failing transaction',
+          {
+            provider: transaction.provider,
+            transactionId: transaction.id,
+            errorMessage: result.errorMessage,
+          },
+        );
+        await this.settlementService.fail(transaction, event.id, result);
+      } else if (result.success) {
+        // Sync provider (Braintree deposit) returned definitive success.
         await this.settlementService.settle(transaction, event.id, result);
       } else {
+        // Sync provider returned definitive failure.
         await this.settlementService.fail(transaction, event.id, result);
       }
     } catch (error) {
-      // Any exception (provider throw, settlement write failure, etc.) increments retry.
-      // The event stays pending and will be retried next cycle (up to 5 times).
       this.logger.error('Event processing failed — incrementing retry count', {
         eventId: event.id,
         transactionId: event.transactionId,

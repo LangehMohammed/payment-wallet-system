@@ -1,7 +1,7 @@
 import { ConflictException, Injectable } from '@nestjs/common';
 import { PrismaService } from '@app/prisma/prisma.service';
 import { AUTH_CONSTANTS } from './auth.constants';
-import { Prisma, Role } from '@prisma/client';
+import { Prisma } from '@prisma/client';
 
 // ── Input types ───────────────────────────────────────────────────────────────
 

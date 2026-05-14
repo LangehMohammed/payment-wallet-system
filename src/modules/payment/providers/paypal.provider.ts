@@ -1,5 +1,4 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { TransactionType } from '@prisma/client';
 import * as braintree from 'braintree';
 import {
@@ -13,17 +12,23 @@ import { PaypalTokenClient } from './paypal-token.client';
 /**
  * PayPal payment provider adapter (Braintree for deposits, PayPal Payouts for withdrawals).
  *
- * ## Deposit Flow (Braintree + Vault)
+ * ## Deposit Flow (Braintree + Vault) — SYNCHRONOUS
  * 1. createDepositIntent() → braintree.clientToken.generate({ customerId })
- *    Returns client_token for Braintree Drop-in UI initialization
- * 2. Frontend: User authenticates PayPal via Drop-in, returns payment nonce
- * 3. confirmDeposit() → braintree.transaction.sale({ paymentMethodNonce, options: { storeInVaultOnSuccess: true } })
- *    Vaults the PayPal account for future use, returns transaction ID
+ *    Returns client_token for Braintree Drop-in UI initialization.
+ * 2. Frontend: User authenticates PayPal via Drop-in, returns payment nonce.
+ * 3. Processor calls confirmDeposit() → braintree.transaction.sale()
+ *    Braintree returns a synchronous success/failure result.
+ *    Returns requiresWebhook: false — processor calls settlementService immediately.
  *
- * ## Payout Flow (PayPal Payouts API)
- * 1. createPayout() → PayPal Payouts API call
- *    Requires merchant to have PayPal business account with Payouts enabled
- *    NOTE: Currently stubbed — requires separate PayPal REST SDK (not Braintree)
+ * ## Payout Flow (PayPal Payouts API) — ASYNCHRONOUS
+ * 1. Processor calls createPayout() → PayPal Payouts REST API.
+ *    PayPal accepts the batch synchronously but processes asynchronously.
+ *    Returns requiresWebhook: true — processor marks outbox delivered and exits.
+ * 2. Webhook receives PAYMENT.PAYOUTSBATCH.SUCCESS / DENIED → settles.
+ *
+ * ## requiresWebhook contract
+ *   confirmDeposit → requiresWebhook: false  (Braintree is synchronous)
+ *   createPayout   → requiresWebhook: true   (PayPal Payouts is asynchronous)
  *
  * ## Error contract
  * All methods MUST NOT throw. Errors are caught and returned as
@@ -34,10 +39,12 @@ export class PaypalProvider implements IPaymentProvider {
   private readonly logger = new Logger(PaypalProvider.name);
   private readonly gateway: braintree.BraintreeGateway;
 
-  constructor(private readonly configService: ProviderConfigService, private readonly tokenClient: PaypalTokenClient) {
+  constructor(
+    private readonly configService: ProviderConfigService,
+    private readonly tokenClient: PaypalTokenClient,
+  ) {
     const braintreeConfig = this.configService.BraintreeConfig;
     const paypalConfig = this.configService.PaypalConfig;
-
 
     if (!braintreeConfig) {
       this.logger.warn(
@@ -51,7 +58,6 @@ export class PaypalProvider implements IPaymentProvider {
       );
     }
 
-    // Initialize Braintree Gateway
     this.gateway = new braintree.BraintreeGateway({
       environment:
         braintreeConfig.environment === 'production'
@@ -70,12 +76,6 @@ export class PaypalProvider implements IPaymentProvider {
    *
    * Expected payload:
    *   { userId, customerId? }
-   *
-   * SDK call:
-   *   const response = await gateway.clientToken.generate({
-   *     customerId: payload.customerId // loads vaulted payment methods if present
-   *   });
-   *   return { clientToken: response.clientToken };
    */
   async createDepositIntent(
     payload: Record<string, unknown>,
@@ -91,7 +91,6 @@ export class PaypalProvider implements IPaymentProvider {
 
       const options: braintree.ClientTokenRequest = {};
       if (customerId) {
-        // If customerId exists, Braintree will load vaulted payment methods
         options.customerId = customerId;
       }
 
@@ -131,14 +130,6 @@ export class PaypalProvider implements IPaymentProvider {
    *
    * Expected payload:
    *   { nonce, amount, currency, userId, customerId? }
-   *
-   * SDK call:
-   *   const result = await gateway.transaction.sale({
-   *     amount: payload.amount,
-   *     paymentMethodNonce: payload.nonce,
-   *     options: { storeInVaultOnSuccess: true, submitForSettlement: true },
-   *     customerId: payload.customerId
-   *   });
    */
   async confirmDeposit(
     payload: Record<string, unknown>,
@@ -150,7 +141,7 @@ export class PaypalProvider implements IPaymentProvider {
       const userId = String(payload['userId']);
       const customerId = payload['customerId'] as string | undefined;
 
-      this.logger.log('Executing Braintree transaction.sale', {
+      this.logger.log('Executing Braintree transaction.sale (synchronous)', {
         amount,
         currency,
         userId,
@@ -161,12 +152,11 @@ export class PaypalProvider implements IPaymentProvider {
         amount,
         paymentMethodNonce: nonce,
         options: {
-          storeInVaultOnSuccess: true, // Vault PayPal account for future use
-          submitForSettlement: true, // Auto-settle (no separate capture step)
+          storeInVaultOnSuccess: true,
+          submitForSettlement: true,
         },
       };
 
-      // If customerId exists, associate transaction with that customer
       if (customerId) {
         saleRequest.customerId = customerId;
       }
@@ -174,10 +164,13 @@ export class PaypalProvider implements IPaymentProvider {
       const result = await this.gateway.transaction.sale(saleRequest);
 
       if (result.success && result.transaction) {
-        this.logger.log('Braintree transaction succeeded', {
-          transactionId: result.transaction.id,
-          status: result.transaction.status,
-        });
+        this.logger.log(
+          'Braintree transaction succeeded — settling immediately',
+          {
+            transactionId: result.transaction.id,
+            status: result.transaction.status,
+          },
+        );
 
         return {
           success: true,
@@ -192,7 +185,6 @@ export class PaypalProvider implements IPaymentProvider {
         };
       }
 
-      // Transaction failed
       this.logger.warn('Braintree transaction failed', {
         message: result.message,
         errors: result.errors?.deepErrors(),
@@ -202,10 +194,10 @@ export class PaypalProvider implements IPaymentProvider {
         success: false,
         errorMessage: result.message || 'Braintree transaction failed',
         rawResponse: {
-          id: result.transaction.id,
-          status: result.transaction.status,
-          amount: result.transaction.amount,
-          currency: result.transaction.currencyIsoCode,
+          id: result.transaction?.id,
+          status: result.transaction?.status,
+          amount: result.transaction?.amount,
+          currency: result.transaction?.currencyIsoCode,
         },
       };
     } catch (error) {
@@ -224,57 +216,46 @@ export class PaypalProvider implements IPaymentProvider {
   }
 
   // ── Payout ─────────────────────────────────────────────────────────────────
- 
+
   /**
    * Creates a payout via PayPal Payouts REST API (POST /v1/payments/payouts).
    *
-   * Authentication: OAuth2 client credentials via PaypalTokenClient.
-   * Token is cached in-process and refreshed automatically before expiry.
+   * Authentication: OAuth2 client credentials via PaypalTokenClient (cached).
    *
-   * Expected payload: { userId, walletId, amount, currency, paypalEmail }
+   * Expected payload:
+   *   { userId, walletId, amount, currency, paypalEmail }
    *
-   * ## Payout batch vs. single item
-   * The Payouts API creates a batch containing one item.
+   * ## Payout batch
    * Single-item batches are standard practice for per-transaction payouts.
-   * The batch_id is stored as providerRef for reconciliation.
-   *
-   * ## Async nature of PayPal payouts
-   * Payouts are not synchronous — PayPal processes them asynchronously.
-   * The API returns PENDING immediately and sends webhook notifications
-   * (PAYMENT.PAYOUTSBATCH.PROCESSING, PAYMENT.PAYOUTSBATCH.SUCCESS, etc.)
-   * when the batch completes. The webhook module (Step 12) will handle
-   * final settlement confirmation.
-   *
-   * For now: success = batch accepted by PayPal (not yet delivered to recipient).
+   * The payout_batch_id is stored as providerRef for webhook reconciliation.
    */
-  async createPayout(payload: Record<string, unknown>): Promise<ProviderResult> {
+  async createPayout(
+    payload: Record<string, unknown>,
+  ): Promise<ProviderResult> {
     try {
       const amount = String(payload['amount']);
       const currency = String(payload['currency']).toUpperCase();
       const paypalEmail = String(payload['paypalEmail']);
       const userId = String(payload['userId']);
       const walletId = String(payload['walletId']);
- 
+
       this.logger.log('Creating PayPal payout via REST API', {
         amount,
         currency,
         userId,
         recipientEmail: paypalEmail,
       });
- 
+
       const environment = this.configService.PaypalConfig.environment;
       const baseUrl =
         environment === 'production'
           ? 'https://api-m.paypal.com'
           : 'https://api-m.sandbox.paypal.com';
- 
-      // Fetch OAuth2 token (cached, refreshed automatically)
+
       const accessToken = await this.tokenClient.getAccessToken();
- 
-      // Unique sender_batch_id prevents duplicate payout submissions
-      // on network retries — includes userId + timestamp for traceability
+
       const senderBatchId = `wallet_${walletId}_${Date.now()}`;
- 
+
       const requestBody = {
         sender_batch_header: {
           sender_batch_id: senderBatchId,
@@ -294,7 +275,7 @@ export class PaypalProvider implements IPaymentProvider {
           },
         ],
       };
- 
+
       const response = await fetch(`${baseUrl}/v1/payments/payouts`, {
         method: 'POST',
         headers: {
@@ -303,15 +284,15 @@ export class PaypalProvider implements IPaymentProvider {
         },
         body: JSON.stringify(requestBody),
       });
- 
+
       const responseBody = (await response.json()) as Record<string, unknown>;
- 
+
       if (!response.ok) {
         this.logger.warn('PayPal Payouts API returned error', {
           status: response.status,
           body: responseBody,
         });
- 
+
         return {
           success: false,
           errorMessage:
@@ -320,20 +301,26 @@ export class PaypalProvider implements IPaymentProvider {
           rawResponse: responseBody,
         };
       }
- 
-      // Extract batch_header from response
-      const batchHeader = responseBody['batch_header'] as Record<string, unknown>;
+
+      const batchHeader = responseBody['batch_header'] as Record<
+        string,
+        unknown
+      >;
       const payoutBatchId = batchHeader?.['payout_batch_id'] as string;
       const batchStatus = batchHeader?.['batch_status'] as string;
- 
-      this.logger.log('PayPal payout batch created successfully', {
-        payoutBatchId,
-        batchStatus,
-        senderBatchId,
-      });
- 
+
+      this.logger.log(
+        'PayPal payout batch accepted — awaiting webhook confirmation',
+        {
+          payoutBatchId,
+          batchStatus,
+          senderBatchId,
+        },
+      );
+
       return {
         success: true,
+        requiresWebhook: true,
         providerRef: payoutBatchId,
         rawResponse: responseBody,
       };
@@ -342,7 +329,7 @@ export class PaypalProvider implements IPaymentProvider {
         error: error instanceof Error ? error.message : String(error),
         payload,
       });
- 
+
       return {
         success: false,
         errorMessage:
@@ -352,7 +339,7 @@ export class PaypalProvider implements IPaymentProvider {
     }
   }
 
-  // ── Unified Process (Backwards Compatibility) ──────────────────────────────
+  // ── Unified Process ────────────────────────────────────────────────────────
 
   /**
    * Routes to confirmDeposit() or createPayout() based on transaction type.
