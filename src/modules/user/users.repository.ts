@@ -24,6 +24,11 @@ const WALLET_SUMMARY_SELECT = {
   pendingBalance: true,
 } as const;
 
+const PAYMENT_INTERNAL_SELECT = {
+  id: true,
+  braintreeCustomerId: true,
+} as const;
+
 // ── Types ──────────────────────────────────────────────────────────────────────
 
 export type UserProfile = Prisma.UserGetPayload<{
@@ -34,6 +39,10 @@ export type UserWithWallet = Prisma.UserGetPayload<{
   select: typeof USER_PUBLIC_SELECT & {
     wallet: { select: typeof WALLET_SUMMARY_SELECT };
   };
+}>;
+
+export type UserPaymentInternal = Prisma.UserGetPayload<{
+  select: typeof PAYMENT_INTERNAL_SELECT;
 }>;
 
 export interface PaginatedUsers {
@@ -108,6 +117,15 @@ export class UsersRepository {
     });
   }
 
+  async findPaymentInternalById(
+    id: string,
+  ): Promise<UserPaymentInternal | null> {
+    return this.prisma.user.findUnique({
+      where: { id },
+      select: PAYMENT_INTERNAL_SELECT,
+    });
+  }
+
   // ── Writes ─────────────────────────────────────────────────────────────────
 
   async updateProfile(
@@ -156,6 +174,28 @@ export class UsersRepository {
       where: { id },
       data,
       select: USER_PUBLIC_SELECT,
+    });
+  }
+
+  async upsertBraintreeCustomerId(
+    userId: string,
+    customerId: string,
+    tx?: Prisma.TransactionClient,
+  ): Promise<void> {
+    const client = tx ?? this.prisma;
+
+    // Idempotency guard — read current value within the same tx context.
+    const current = await client.user.findUnique({
+      where: { id: userId },
+      select: { braintreeCustomerId: true },
+    });
+
+    if (current?.braintreeCustomerId === customerId) return;
+
+    await client.user.update({
+      where: { id: userId },
+      data: { braintreeCustomerId: customerId },
+      select: { id: true },
     });
   }
 

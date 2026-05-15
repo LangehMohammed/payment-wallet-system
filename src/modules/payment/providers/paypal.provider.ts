@@ -19,6 +19,8 @@ import { PaypalTokenClient } from './paypal-token.client';
  * 3. Processor calls confirmDeposit() → braintree.transaction.sale()
  *    Braintree returns a synchronous success/failure result.
  *    Returns requiresWebhook: false — processor calls settlementService immediately.
+ *    On success, `rawResponse.customerId` carries the vaulted Braintree customer ID
+ *    (present when storeInVaultOnSuccess: true and Braintree creates/finds a customer).
  *
  * ## Payout Flow (PayPal Payouts API) — ASYNCHRONOUS
  * 1. Processor calls createPayout() → PayPal Payouts REST API.
@@ -86,7 +88,7 @@ export class PaypalProvider implements IPaymentProvider {
 
       this.logger.log('Generating Braintree client token', {
         userId,
-        customerId,
+        hasVaultedCustomer: !!customerId,
       });
 
       const options: braintree.ClientTokenRequest = {};
@@ -98,6 +100,7 @@ export class PaypalProvider implements IPaymentProvider {
 
       this.logger.log('Braintree client token generated successfully', {
         userId,
+        hasVaultedCustomer: !!customerId,
       });
 
       return {
@@ -105,7 +108,7 @@ export class PaypalProvider implements IPaymentProvider {
         clientToken: response.clientToken,
         rawResponse: {
           clientToken: response.clientToken,
-          customerId: customerId || null,
+          customerId: customerId ?? null,
         },
       };
     } catch (error) {
@@ -164,11 +167,15 @@ export class PaypalProvider implements IPaymentProvider {
       const result = await this.gateway.transaction.sale(saleRequest);
 
       if (result.success && result.transaction) {
+        const vaultedCustomerId =
+          result.transaction.customerDetails?.id ?? null;
+
         this.logger.log(
           'Braintree transaction succeeded — settling immediately',
           {
             transactionId: result.transaction.id,
             status: result.transaction.status,
+            hasVaultedCustomer: !!vaultedCustomerId,
           },
         );
 
@@ -181,6 +188,7 @@ export class PaypalProvider implements IPaymentProvider {
             amount: result.transaction.amount,
             currency: result.transaction.currencyIsoCode,
             payment_method: result.transaction.paymentInstrumentType,
+            customerId: vaultedCustomerId,
           },
         };
       }
@@ -198,6 +206,7 @@ export class PaypalProvider implements IPaymentProvider {
           status: result.transaction?.status,
           amount: result.transaction?.amount,
           currency: result.transaction?.currencyIsoCode,
+          customerId: null,
         },
       };
     } catch (error) {
@@ -210,7 +219,7 @@ export class PaypalProvider implements IPaymentProvider {
         success: false,
         errorMessage:
           error instanceof Error ? error.message : 'Unexpected Braintree error',
-        rawResponse: { error: String(error) },
+        rawResponse: { error: String(error), customerId: null },
       };
     }
   }

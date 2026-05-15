@@ -65,6 +65,7 @@ model User {
   password  String
   role      Role          @default(USER)
   status    AccountStatus @default(ACTIVE)
+  braintreeCustomerId String? @unique
   createdAt DateTime      @default(now())
   updatedAt DateTime      @updatedAt
 

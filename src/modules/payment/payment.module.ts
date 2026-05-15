@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AuditLogger } from '@app/common/audit/audit-logger.service';
 import { WalletModule } from '../wallet/wallet.module';
+import { UsersModule } from '../user/users.module';
 import { PaymentController } from './payment.controller';
 import { PaymentService } from './payment.service';
 import { PaymentProcessorService } from './payment-processor.service';
@@ -13,7 +14,7 @@ import { ProviderConfigService } from './providers/config/provider-config.servic
 import { PaypalTokenClient } from './providers/paypal-token.client';
 
 @Module({
-  imports: [WalletModule],
+  imports: [WalletModule, UsersModule],
   controllers: [PaymentController],
   providers: [
     PaymentService,

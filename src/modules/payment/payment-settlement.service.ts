@@ -9,9 +9,10 @@ import { PrismaService } from '@app/prisma/prisma.service';
 import { AuditLogger } from '@app/common/audit/audit-logger.service';
 import { WalletRepository } from '../wallet/wallet.repository';
 import { PaymentRepository } from './payment.repository';
+import { UsersRepository } from '../user/users.repository';
 import { ProviderResult } from './dto';
 
-interface TransactionContext {
+export interface TransactionContext {
   id: string;
   type: TransactionType;
   status: TransactionStatus;
@@ -20,6 +21,7 @@ interface TransactionContext {
   provider: Provider | null;
   senderWalletId: string | null;
   receiverWalletId: string | null;
+  userId: string;
 }
 
 /**
@@ -41,6 +43,7 @@ export class PaymentSettlementService {
     private readonly prisma: PrismaService,
     private readonly walletRepository: WalletRepository,
     private readonly paymentRepository: PaymentRepository,
+    private readonly usersRepository: UsersRepository,
     private readonly audit: AuditLogger,
   ) {}
 
@@ -49,13 +52,14 @@ export class PaymentSettlementService {
   /**
    * Atomically settles a provider-confirmed transaction.
    *
-   * DEPOSIT settlement:
-   *   pendingBalance  -= amount
+   * DEPOSIT settlement :
+   *   pendingBalance   -= amount
    *   availableBalance += amount
    *   Transaction → SETTLED + settledAt + providerRef
    *   LedgerEntry (CREDIT, balanceAfter = new availableBalance)
    *   PaymentLog (SETTLED)
    *   OutboxEvent → deliveredAt = now
+   *   User.braintreeCustomerId ← upserted if present in rawResponse
    *
    * WITHDRAWAL settlement:
    *   lockedBalance -= amount
@@ -201,6 +205,23 @@ export class PaymentSettlementService {
     );
 
     await this.paymentRepository.markDelivered(outboxEventId, tx);
+
+    if (
+      txCtx.provider === Provider.PAYPAL &&
+      typeof result.rawResponse.customerId === 'string' &&
+      result.rawResponse.customerId.length > 0
+    ) {
+      await this.usersRepository.upsertBraintreeCustomerId(
+        txCtx.userId,
+        result.rawResponse.customerId,
+        tx,
+      );
+
+      this.logger.log('Braintree customerId persisted on user', {
+        userId: txCtx.userId,
+        transactionId: txCtx.id,
+      });
+    }
 
     this.logger.log('Deposit settled', {
       transactionId: txCtx.id,

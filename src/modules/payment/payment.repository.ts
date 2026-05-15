@@ -1,5 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import { OutboxEvent, Prisma, Provider, TransactionStatus } from '@prisma/client';
+import {
+  OutboxEvent,
+  Prisma,
+  Provider,
+  TransactionStatus,
+} from '@prisma/client';
 import { PrismaService } from '@app/prisma/prisma.service';
 
 export interface CreatePaymentLogInput {

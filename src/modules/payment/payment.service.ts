@@ -8,6 +8,7 @@ import { Prisma, Provider, TransactionStatus } from '@prisma/client';
 import { AuditLogger } from '@app/common/audit/audit-logger.service';
 import { PrismaService } from '@app/prisma/prisma.service';
 import { WalletRepository } from '../wallet/wallet.repository';
+import { UsersRepository } from '../user/users.repository';
 import { PaymentProviderRegistry } from './providers/registry/payment-provider.registry';
 import {
   CreateDepositIntentDto,
@@ -30,6 +31,7 @@ export class PaymentService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly walletRepository: WalletRepository,
+    private readonly usersRepository: UsersRepository,
     private readonly providerRegistry: PaymentProviderRegistry,
     private readonly audit: AuditLogger,
   ) {}
@@ -49,24 +51,27 @@ export class PaymentService {
     userId: string,
     dto: CreateDepositIntentDto,
   ): Promise<DepositIntentResult> {
-    // Validate user has an active wallet
     const wallet = await this.walletRepository.findByUserId(userId);
-    if (!wallet) {
-      throw new NotFoundException('Wallet not found');
-    }
+    if (!wallet) throw new NotFoundException('Wallet not found');
 
     this.walletRepository.assertActive(wallet);
     this.walletRepository.assertCurrencyMatch(wallet, dto.currency);
 
-    // Resolve provider and call createDepositIntent
     const provider = this.providerRegistry.resolve(dto.provider);
+
+    let braintreeCustomerId: string | undefined;
+    if (dto.provider === Provider.PAYPAL) {
+      const userInternal =
+        await this.usersRepository.findPaymentInternalById(userId);
+      braintreeCustomerId = userInternal?.braintreeCustomerId ?? undefined;
+    }
 
     const result = await provider.createDepositIntent({
       userId,
       walletId: wallet.id,
       amount: dto.amount,
       currency: dto.currency,
-      customerId: dto.braintreeCustomerId, // Only used by Braintree
+      customerId: braintreeCustomerId, // Passed to Braintree only; undefined for Stripe (ignored by StripeProvider).
     });
 
     if (!result.success) {
@@ -89,7 +94,7 @@ export class PaymentService {
    *   1. Check idempotency — return existing transaction if key already used.
    *   2. Lock wallet and validate.
    *   3. Credit pendingBalance (funds not yet spendable).
-   *   4. Create Transaction (INITIATED) + LedgerEntry + OutboxEvent.
+   *   4. Create Transaction (INITIATED) + OutboxEvent.
    *   5. Return transaction ID — the outbox processor will settle async.
    *
    * The provider.confirmDeposit() call happens in the outbox processor, not here.
@@ -119,8 +124,6 @@ export class PaymentService {
     const amount = new Prisma.Decimal(dto.amount);
 
     const result = await this.prisma.$transaction(async (tx) => {
-      // Lock wallet row — wallet fetch and lock happen together atomically
-      // to prevent TOCTOU: no gap between reading and locking the wallet.
       const wallet = await this.walletRepository.findByUserId(userId);
       if (!wallet) throw new NotFoundException('Wallet not found');
 
@@ -129,10 +132,8 @@ export class PaymentService {
       this.walletRepository.assertActive(locked);
       this.walletRepository.assertCurrencyMatch(locked, dto.currency);
 
-      // Credit pendingBalance — funds not yet spendable
       await this.walletRepository.creditPending(locked.id, amount, tx);
 
-      // Prepare outbox payload with provider-specific fields
       const outboxPayload: Record<string, unknown> = {
         walletId: locked.id,
         userId,
@@ -140,12 +141,10 @@ export class PaymentService {
         currency: dto.currency,
       };
 
-      // Add Stripe-specific fields
       if (dto.provider === Provider.STRIPE && dto.paymentIntentId) {
         outboxPayload.paymentIntentId = dto.paymentIntentId;
       }
 
-      // Add Braintree-specific fields
       if (dto.provider === Provider.PAYPAL) {
         if (dto.nonce) outboxPayload.nonce = dto.nonce;
         if (dto.braintreeCustomerId) {
@@ -153,9 +152,6 @@ export class PaymentService {
         }
       }
 
-      // Create Transaction (INITIATED) + OutboxEvent
-      // NOTE: No LedgerEntry here — ledger is only written on settlement when
-      // funds move from pending → available. This prevents double-accounting.
       const transaction = await tx.transaction.create({
         data: {
           idempotencyKey: dto.idempotencyKey,
@@ -204,15 +200,11 @@ export class PaymentService {
    *   3. Debit availableBalance, credit lockedBalance (funds held until settlement).
    *   4. Create Transaction (INITIATED) + OutboxEvent.
    *   5. Return transaction ID — the outbox processor will call provider.createPayout() async.
-   *
-   * The provider.createPayout() call happens in the outbox processor, not here.
-   * This follows the same async pattern as deposits for consistency.
    */
   async createPayout(
     userId: string,
     dto: CreatePayoutDto,
   ): Promise<{ transactionId: string; status: TransactionStatus }> {
-    // Idempotency check (outside tx — cheap read first)
     const existing = await this.prisma.transaction.findUnique({
       where: { idempotencyKey: dto.idempotencyKey },
       select: { id: true, status: true },
@@ -232,8 +224,6 @@ export class PaymentService {
     const amount = new Prisma.Decimal(dto.amount);
 
     const result = await this.prisma.$transaction(async (tx) => {
-      // Lock wallet row — wallet fetch and lock happen together atomically
-      // to prevent TOCTOU: no gap between reading and locking the wallet.
       const wallet = await this.walletRepository.findByUserId(userId);
       if (!wallet) throw new NotFoundException('Wallet not found');
 
@@ -242,7 +232,6 @@ export class PaymentService {
       this.walletRepository.assertActive(locked);
       this.walletRepository.assertCurrencyMatch(locked, dto.currency);
 
-      // Check sufficient balance
       if (locked.availableBalance.lessThan(amount)) {
         this.audit.warn('WITHDRAWAL_FAILED', {
           userId,
@@ -255,10 +244,8 @@ export class PaymentService {
         throw new UnprocessableEntityException('Insufficient balance.');
       }
 
-      // Debit available, credit locked — funds unavailable until settlement
       await this.walletRepository.debitAvailableAndLock(locked.id, amount, tx);
 
-      // Prepare outbox payload with provider-specific fields
       const outboxPayload: Record<string, unknown> = {
         walletId: locked.id,
         userId,
@@ -266,19 +253,14 @@ export class PaymentService {
         currency: dto.currency,
       };
 
-      // Add Stripe-specific fields
       if (dto.provider === Provider.STRIPE && dto.stripeConnectedAccountId) {
         outboxPayload.stripeConnectedAccountId = dto.stripeConnectedAccountId;
       }
 
-      // Add PayPal-specific fields
       if (dto.provider === Provider.PAYPAL && dto.paypalEmail) {
         outboxPayload.paypalEmail = dto.paypalEmail;
       }
 
-      // Create Transaction (INITIATED) + OutboxEvent
-      // NOTE: No LedgerEntry here — ledger is only written on settlement when
-      // locked balance is decremented (funds leave the system).
       const transaction = await tx.transaction.create({
         data: {
           idempotencyKey: dto.idempotencyKey,

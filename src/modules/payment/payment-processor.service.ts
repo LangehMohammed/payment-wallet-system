@@ -40,10 +40,11 @@ const PROCESSOR_LOCK_TTL_SECONDS = 15 * 60; // 15 minutes
  *   1. Acquire distributed Redis lock (prevents concurrent processing).
  *   2. Fetch up to 100 pending provider events (DEPOSIT_INITIATED, WITHDRAWAL_INITIATED).
  *   3. For each event (sequential — avoids DB contention on wallet rows):
- *      a. Resolve provider adapter from transaction.provider.
- *      b. Call provider.process(payload, transactionType).
- *      c. Branch on requiresWebhook + success (see above).
- *      d. On exception → incrementRetry (max 5, then dead letter).
+ *      a. Extract userId from event.payload.
+ *      b. Resolve provider adapter from transaction.provider.
+ *      c. Call provider.process(payload, transactionType).
+ *      d. Branch on requiresWebhook + success (see above).
+ *      e. On exception → incrementRetry (max 5, then dead letter).
  *
  * ## Retry strategy
  * Linear retry count (no backoff). Events with retryCount >= 5 are filtered out
@@ -121,6 +122,18 @@ export class PaymentProcessorService {
    */
   private async processEvent(event: any): Promise<void> {
     try {
+      const payload = event.payload as Record<string, unknown>;
+
+      const userId = payload['userId'];
+      if (typeof userId !== 'string' || userId.length === 0) {
+        this.logger.error(
+          'OutboxEvent payload missing userId — data integrity error',
+          { eventId: event.id, transactionId: event.transactionId },
+        );
+        await this.paymentRepository.incrementRetry(event.id);
+        return;
+      }
+
       const transaction = await this.paymentRepository.findTransactionById(
         event.transactionId,
       );
@@ -143,6 +156,8 @@ export class PaymentProcessorService {
         return;
       }
 
+      const txCtx = { ...transaction, userId };
+
       const provider = this.providerRegistry.resolve(transaction.provider);
 
       this.logger.log('Calling provider', {
@@ -152,14 +167,10 @@ export class PaymentProcessorService {
         eventId: event.id,
       });
 
-      const result = await provider.process(
-        event.payload as Record<string, unknown>,
-        transaction.type,
-      );
+      const result = await provider.process(payload, transaction.type);
 
       if (result.requiresWebhook && result.success) {
         // Async provider accepted the request — webhook drives settlement.
-        // Mark the outbox event delivered so it is not picked up again.
         await this.paymentRepository.markDelivered(event.id);
         this.logger.log(
           'Provider accepted (async) — outbox marked delivered, awaiting webhook',
@@ -170,9 +181,7 @@ export class PaymentProcessorService {
           },
         );
       } else if (result.requiresWebhook && !result.success) {
-        // Async provider rejected the request before processing began
-        // (e.g. invalid account, insufficient merchant funds).
-        // No webhook will arrive — fail immediately.
+        // Async provider rejected synchronously before processing began.
         this.logger.warn(
           'Async provider rejected request synchronously — failing transaction',
           {
@@ -181,13 +190,13 @@ export class PaymentProcessorService {
             errorMessage: result.errorMessage,
           },
         );
-        await this.settlementService.fail(transaction, event.id, result);
+        await this.settlementService.fail(txCtx, event.id, result);
       } else if (result.success) {
         // Sync provider (Braintree deposit) returned definitive success.
-        await this.settlementService.settle(transaction, event.id, result);
+        await this.settlementService.settle(txCtx, event.id, result);
       } else {
         // Sync provider returned definitive failure.
-        await this.settlementService.fail(transaction, event.id, result);
+        await this.settlementService.fail(txCtx, event.id, result);
       }
     } catch (error) {
       this.logger.error('Event processing failed — incrementing retry count', {
