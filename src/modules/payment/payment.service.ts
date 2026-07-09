@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Injectable,
   Logger,
   NotFoundException,
@@ -6,7 +7,6 @@ import {
 } from '@nestjs/common';
 import { Prisma, Provider, TransactionStatus } from '@prisma/client';
 import { AuditLogger } from '@app/common/audit/audit-logger.service';
-import { PrismaService } from '@app/prisma/prisma.service';
 import { WalletRepository } from '../wallet/wallet.repository';
 import { UsersRepository } from '../user/users.repository';
 import { PaymentProviderRegistry } from './providers/registry/payment-provider.registry';
@@ -16,6 +16,9 @@ import {
   CreatePayoutDto,
 } from './dto';
 import { DepositIntentResult } from './providers/interface/payment-provider.interface';
+import { StripeConnectRepository } from '../stripe-connect/stripe-connect.repository';
+import { PaymentRepository } from './payment.repository';
+import { TransactionRepository } from '../transaction/transaction.repository';
 
 /**
  * Payment service — orchestrates deposit intent creation and confirmation.
@@ -29,10 +32,12 @@ export class PaymentService {
   private readonly logger = new Logger(PaymentService.name);
 
   constructor(
-    private readonly prisma: PrismaService,
+    private readonly paymentRepository: PaymentRepository,
+    private readonly transactionRepository: TransactionRepository,
     private readonly walletRepository: WalletRepository,
     private readonly usersRepository: UsersRepository,
     private readonly providerRegistry: PaymentProviderRegistry,
+    private readonly stripeConnectRepository: StripeConnectRepository,
     private readonly audit: AuditLogger,
   ) {}
 
@@ -105,10 +110,9 @@ export class PaymentService {
     dto: ConfirmDepositDto,
   ): Promise<{ transactionId: string; status: TransactionStatus }> {
     // Idempotency check (outside tx — cheap read first)
-    const existing = await this.prisma.transaction.findUnique({
-      where: { idempotencyKey: dto.idempotencyKey },
-      select: { id: true, status: true },
-    });
+    const existing = await this.transactionRepository.findByIdempotencyKey(
+      dto.idempotencyKey,
+    );
 
     if (existing) {
       this.audit.log('IDEMPOTENT_REPLAY', {
@@ -123,7 +127,7 @@ export class PaymentService {
 
     const amount = new Prisma.Decimal(dto.amount);
 
-    const result = await this.prisma.$transaction(async (tx) => {
+    const result = await this.paymentRepository.withTransaction(async (tx) => {
       const wallet = await this.walletRepository.findByUserId(userId);
       if (!wallet) throw new NotFoundException('Wallet not found');
 
@@ -205,10 +209,9 @@ export class PaymentService {
     userId: string,
     dto: CreatePayoutDto,
   ): Promise<{ transactionId: string; status: TransactionStatus }> {
-    const existing = await this.prisma.transaction.findUnique({
-      where: { idempotencyKey: dto.idempotencyKey },
-      select: { id: true, status: true },
-    });
+    const existing = await this.transactionRepository.findByIdempotencyKey(
+      dto.idempotencyKey,
+    );
 
     if (existing) {
       this.audit.log('IDEMPOTENT_REPLAY', {
@@ -223,7 +226,7 @@ export class PaymentService {
 
     const amount = new Prisma.Decimal(dto.amount);
 
-    const result = await this.prisma.$transaction(async (tx) => {
+    const result = await this.paymentRepository.withTransaction(async (tx) => {
       const wallet = await this.walletRepository.findByUserId(userId);
       if (!wallet) throw new NotFoundException('Wallet not found');
 
@@ -253,12 +256,21 @@ export class PaymentService {
         currency: dto.currency,
       };
 
-      if (dto.provider === Provider.STRIPE && dto.stripeConnectedAccountId) {
-        outboxPayload.stripeConnectedAccountId = dto.stripeConnectedAccountId;
+      let stripeConnectedAccountId: string | undefined;
+
+      if (dto.provider === Provider.STRIPE) {
+        stripeConnectedAccountId =
+          await this.resolveStripeConnectAccount(userId);
+
+        outboxPayload.stripeConnectedAccountId = stripeConnectedAccountId;
       }
 
-      if (dto.provider === Provider.PAYPAL && dto.paypalEmail) {
-        outboxPayload.paypalEmail = dto.paypalEmail;
+      let paypalEmail: string | undefined;
+
+      if (dto.provider === Provider.PAYPAL) {
+        paypalEmail = await this.resolvePaypalEmail(userId);
+
+        outboxPayload.paypalEmail = paypalEmail;
       }
 
       const transaction = await tx.transaction.create({
@@ -296,5 +308,47 @@ export class PaymentService {
     });
 
     return { transactionId: result.id, status: result.status };
+  }
+
+  // ── Private ────────────────────────────────────────────────────────────────
+
+  /**
+   * Resolves the authenticated user's Stripe Connect account ID from the DB.
+   *
+   * Throws BadRequestException (not NotFoundException) because this is a
+   * business-logic precondition the user must satisfy — it is not a missing
+   * resource. The 400 response body tells the caller exactly what to do next.
+   */
+  private async resolveStripeConnectAccount(userId: string): Promise<string> {
+    const user = await this.stripeConnectRepository.findById(userId);
+
+    if (!user?.stripeConnectAccountId) {
+      throw new BadRequestException(
+        'No Stripe Connect account linked. ' +
+          'Complete Strip Connect account onboarding before initiating a Stripe payout.',
+      );
+    }
+
+    return user.stripeConnectAccountId;
+  }
+
+  /**
+   * Resolves the authenticated user's PayPalEmail from the DB.
+   *
+   * Throws BadRequestException (not NotFoundException) because this is a
+   * business-logic precondition the user must satisfy — it is not a missing
+   * resource. The 400 response body tells the caller exactly what to do next.
+   */
+  private async resolvePaypalEmail(userId: string): Promise<string> {
+    const user = await this.paymentRepository.findUserById(userId);
+
+    if (!user.paypalEmail) {
+      throw new BadRequestException(
+        'No PayPalEmail configured. ' +
+          'Complete PayPalEmail linking before initiating a PayPal payout.',
+      );
+    }
+
+    return user.paypalEmail;
   }
 }

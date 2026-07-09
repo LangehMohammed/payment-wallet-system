@@ -1,5 +1,5 @@
 import { ConflictException, Injectable } from '@nestjs/common';
-import { AccountStatus, Prisma, Role } from '@prisma/client';
+import { AccountStatus, Prisma, PrismaClient, Role } from '@prisma/client';
 import { PrismaService } from '@app/prisma/prisma.service';
 
 // ── Projection constants ───────────────────────────────────────────────────────
@@ -60,9 +60,25 @@ export interface PaginationParams {
   limit: number;
 }
 
+export type TransactionClient = Omit<
+  PrismaClient,
+  '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'
+>;
+
 @Injectable()
 export class UsersRepository {
   constructor(private readonly prisma: PrismaService) {}
+
+  /**
+   * Centralized transaction wrapper
+   */
+  async withTransaction<T>(
+    callback: (tx: TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    return this.prisma.$transaction(async (tx) => {
+      return callback(tx as TransactionClient);
+    });
+  }
 
   // ── Reads ──────────────────────────────────────────────────────────────────
 
@@ -180,7 +196,7 @@ export class UsersRepository {
   async upsertBraintreeCustomerId(
     userId: string,
     customerId: string,
-    tx?: Prisma.TransactionClient,
+    tx?: TransactionClient,
   ): Promise<void> {
     const client = tx ?? this.prisma;
 

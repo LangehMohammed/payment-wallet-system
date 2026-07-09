@@ -6,7 +6,6 @@ import {
 } from '@nestjs/common';
 import { Prisma, Provider, Transaction } from '@prisma/client';
 import { AuditLogger } from '@app/common/audit/audit-logger.service';
-import { PrismaService } from '@app/prisma/prisma.service';
 import { TransactionRepository } from './transaction.repository';
 import {
   DepositDto,
@@ -58,7 +57,6 @@ export interface MutationResult {
 @Injectable()
 export class TransactionService {
   constructor(
-    private readonly prisma: PrismaService,
     private readonly transactionRepository: TransactionRepository,
     private readonly walletRepository: WalletRepository,
     private readonly audit: AuditLogger,
@@ -95,7 +93,7 @@ export class TransactionService {
 
     const amount = new Prisma.Decimal(dto.amount);
 
-    const result = await this.prisma.$transaction(async (tx) => {
+    const result = await this.transactionRepository.withTransaction(async (tx) => {
       const wallet = await this.walletRepository.findByUserId(userId);
       if (!wallet) throw new ForbiddenException('Wallet not found');
 
@@ -172,7 +170,7 @@ export class TransactionService {
 
     const amount = new Prisma.Decimal(dto.amount);
 
-    const result = await this.prisma.$transaction(async (tx) => {
+    const result = await this.transactionRepository.withTransaction(async (tx) => {
       const wallet = await this.walletRepository.findByUserId(userId);
       if (!wallet) throw new ForbiddenException('Wallet not found');
 
@@ -265,7 +263,7 @@ export class TransactionService {
     if (!receiverWallet)
       throw new ForbiddenException('Recipient wallet not found');
 
-    const result = await this.prisma.$transaction(async (tx) => {
+    const result = await this.transactionRepository.withTransaction(async (tx) => {
       // Consistent lock ordering — prevents AB/BA deadlock across concurrent transfers
       const [firstId, secondId] =
         senderWallet.id < receiverWallet.id

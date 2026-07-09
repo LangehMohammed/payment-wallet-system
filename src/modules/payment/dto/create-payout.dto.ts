@@ -74,29 +74,4 @@ export class CreatePayoutDto {
   @IsNotEmpty()
   @MaxLength(255)
   description?: string;
-
-  // ── Stripe-specific fields ────────────────────────────────────────────────
-
-  @ApiProperty({
-    description:
-      'Stripe Connect Express account ID (required if provider is STRIPE)',
-    example: 'acct_1234567890abcdef',
-    required: false,
-  })
-  @ValidateIf((o) => o.provider === SupportedProviders.STRIPE)
-  @IsString()
-  @IsNotEmpty()
-  stripeConnectedAccountId?: string;
-
-  // ── PayPal-specific fields ─────────────────────────────────────────────────
-
-  @ApiProperty({
-    description:
-      'PayPal email address for payout (required if provider is PAYPAL)',
-    example: 'user@example.com',
-    required: false,
-  })
-  @ValidateIf((o) => o.provider === SupportedProviders.PAYPAL)
-  @IsEmail()
-  paypalEmail?: string;
 }

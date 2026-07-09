@@ -45,10 +45,6 @@ const PROCESSOR_LOCK_TTL_SECONDS = 15 * 60; // 15 minutes
  *      c. Call provider.process(payload, transactionType).
  *      d. Branch on requiresWebhook + success (see above).
  *      e. On exception → incrementRetry (max 5, then dead letter).
- *
- * ## Retry strategy
- * Linear retry count (no backoff). Events with retryCount >= 5 are filtered out
- * by findPendingProviderEvents and require manual intervention.
  */
 @Injectable()
 export class PaymentProcessorService {
@@ -112,7 +108,7 @@ export class PaymentProcessorService {
    * Branches on ProviderResult.requiresWebhook to determine whether to
    * settle immediately (Braintree) or defer to the webhook module (Stripe/PayPal).
    *
-   * Error handling:
+   * ## Branching
    *   - Provider throws                          → incrementRetry
    *   - requiresWebhook: true  + success: true   → markDelivered (webhook settles)
    *   - requiresWebhook: true  + success: false  → .fail() (provider rejected sync)
@@ -123,11 +119,11 @@ export class PaymentProcessorService {
   private async processEvent(event: any): Promise<void> {
     try {
       const payload = event.payload as Record<string, unknown>;
-
       const userId = payload['userId'];
+
       if (typeof userId !== 'string' || userId.length === 0) {
         this.logger.error(
-          'OutboxEvent payload missing userId — data integrity error',
+          'OutboxEvent payload missing userId — cannot build TransactionContext',
           { eventId: event.id, transactionId: event.transactionId },
         );
         await this.paymentRepository.incrementRetry(event.id);
@@ -155,7 +151,7 @@ export class PaymentProcessorService {
         await this.paymentRepository.incrementRetry(event.id);
         return;
       }
-
+      
       const txCtx = { ...transaction, userId };
 
       const provider = this.providerRegistry.resolve(transaction.provider);
@@ -170,7 +166,6 @@ export class PaymentProcessorService {
       const result = await provider.process(payload, transaction.type);
 
       if (result.requiresWebhook && result.success) {
-        // Async provider accepted the request — webhook drives settlement.
         await this.paymentRepository.markDelivered(event.id);
         this.logger.log(
           'Provider accepted (async) — outbox marked delivered, awaiting webhook',
@@ -181,7 +176,6 @@ export class PaymentProcessorService {
           },
         );
       } else if (result.requiresWebhook && !result.success) {
-        // Async provider rejected synchronously before processing began.
         this.logger.warn(
           'Async provider rejected request synchronously — failing transaction',
           {
@@ -192,10 +186,8 @@ export class PaymentProcessorService {
         );
         await this.settlementService.fail(txCtx, event.id, result);
       } else if (result.success) {
-        // Sync provider (Braintree deposit) returned definitive success.
         await this.settlementService.settle(txCtx, event.id, result);
       } else {
-        // Sync provider returned definitive failure.
         await this.settlementService.fail(txCtx, event.id, result);
       }
     } catch (error) {

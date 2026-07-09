@@ -3,9 +3,14 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { AccountStatus, Currency, Prisma } from '@prisma/client';
+import { AccountStatus, Currency, Prisma, PrismaClient } from '@prisma/client';
 import { PrismaService } from '@app/prisma/prisma.service';
 import { KeysetCursor } from './interface';
+
+export type TransactionClient = Omit<
+  PrismaClient,
+  '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'
+>;
 
 // ── Projection constants ───────────────────────────────────────────────────────
 
@@ -95,6 +100,17 @@ export interface WalletSnapshot {
 @Injectable()
 export class WalletRepository {
   constructor(private readonly prisma: PrismaService) {}
+
+  /**
+   * Centralized transaction wrapper
+   */
+  async withTransaction<T>(
+    callback: (tx: TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    return this.prisma.$transaction(async (tx) => {
+      return callback(tx as TransactionClient);
+    });
+  }
 
   // ── Wallet reads ───────────────────────────────────────────────────────────
 
@@ -202,7 +218,7 @@ export class WalletRepository {
    */
   async lockWallet(
     walletId: string,
-    tx: Prisma.TransactionClient,
+    tx: TransactionClient,
   ): Promise<WalletSnapshot> {
     const rows = await tx.$queryRaw<WalletLockRow[]>`
       SELECT
@@ -256,7 +272,7 @@ export class WalletRepository {
   async creditAvailable(
     walletId: string,
     amount: Prisma.Decimal,
-    tx: Prisma.TransactionClient,
+    tx: TransactionClient,
   ): Promise<Prisma.Decimal> {
     const updated = await tx.wallet.update({
       where: { id: walletId },
@@ -269,7 +285,7 @@ export class WalletRepository {
   async debitAvailableAndLock(
     walletId: string,
     amount: Prisma.Decimal,
-    tx: Prisma.TransactionClient,
+    tx: TransactionClient,
   ): Promise<{
     availableBalance: Prisma.Decimal;
     lockedBalance: Prisma.Decimal;
@@ -288,7 +304,7 @@ export class WalletRepository {
   async creditPending(
     walletId: string,
     amount: Prisma.Decimal,
-    tx: Prisma.TransactionClient,
+    tx: TransactionClient,
   ): Promise<Prisma.Decimal> {
     const updated = await tx.wallet.update({
       where: { id: walletId },
@@ -301,7 +317,7 @@ export class WalletRepository {
   async settlePending(
     walletId: string,
     amount: Prisma.Decimal,
-    tx: Prisma.TransactionClient,
+    tx: TransactionClient,
   ): Promise<Prisma.Decimal> {
     const updated = await tx.wallet.update({
       where: { id: walletId },
@@ -317,7 +333,7 @@ export class WalletRepository {
   async settleWithdrawal(
     walletId: string,
     amount: Prisma.Decimal,
-    tx: Prisma.TransactionClient,
+    tx: TransactionClient,
   ): Promise<Prisma.Decimal> {
     const updated = await tx.wallet.update({
       where: { id: walletId },
@@ -330,7 +346,7 @@ export class WalletRepository {
   async debitAvailable(
     walletId: string,
     amount: Prisma.Decimal,
-    tx: Prisma.TransactionClient,
+    tx: TransactionClient,
   ): Promise<Prisma.Decimal> {
     const updated = await tx.wallet.update({
       where: { id: walletId },

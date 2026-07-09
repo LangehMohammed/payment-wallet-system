@@ -8,6 +8,7 @@ import {
   TransactionStatus,
   TransactionType,
   Provider,
+  PrismaClient,
 } from '@prisma/client';
 import { PrismaService } from '@app/prisma/prisma.service';
 
@@ -40,11 +41,28 @@ export interface CreateOutboxEventInput {
   payload: Prisma.InputJsonValue;
 }
 
+
+export type TransactionClient = Omit<
+  PrismaClient,
+  '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'
+>;
+
 // ─── Repository ───────────────────────────────────────────────────────────────
 
 @Injectable()
 export class TransactionRepository {
   constructor(private readonly prisma: PrismaService) {}
+
+  /**
+   * Centralized transaction wrapper
+   */
+  async withTransaction<T>(
+    callback: (tx: TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    return this.prisma.$transaction(async (tx) => {
+      return callback(tx as TransactionClient);
+    });
+  }
 
   // ── Idempotency ────────────────────────────────────────────────────────────
 
@@ -72,7 +90,7 @@ export class TransactionRepository {
     input: CreateTransactionInput,
     pendingBalanceAfter: Prisma.Decimal,
     outboxPayload: Prisma.InputJsonValue,
-    tx: Prisma.TransactionClient,
+    tx: TransactionClient,
   ): Promise<Transaction> {
     const transaction = await tx.transaction.create({
       data: {
@@ -123,7 +141,7 @@ export class TransactionRepository {
     currency: Currency,
     availableBalanceAfter: Prisma.Decimal,
     outboxPayload: Prisma.InputJsonValue,
-    tx: Prisma.TransactionClient,
+    tx: TransactionClient,
   ): Promise<Transaction> {
     const transaction = await tx.transaction.update({
       where: { id: transactionId },
@@ -168,7 +186,7 @@ export class TransactionRepository {
     input: CreateTransactionInput,
     lockedBalanceAfter: Prisma.Decimal,
     outboxPayload: Prisma.InputJsonValue,
-    tx: Prisma.TransactionClient,
+    tx: TransactionClient,
   ): Promise<Transaction> {
     const transaction = await tx.transaction.create({
       data: {
@@ -223,7 +241,7 @@ export class TransactionRepository {
     senderBalanceAfter: Prisma.Decimal,
     receiverBalanceAfter: Prisma.Decimal,
     outboxPayload: Prisma.InputJsonValue,
-    tx: Prisma.TransactionClient,
+    tx: TransactionClient,
   ): Promise<Transaction> {
     const transaction = await tx.transaction.create({
       data: {
@@ -280,7 +298,7 @@ export class TransactionRepository {
   async updateStatus(
     transactionId: string,
     status: TransactionStatus,
-    tx?: Prisma.TransactionClient,
+    tx?: TransactionClient,
   ): Promise<void> {
     const client = tx ?? this.prisma;
     await client.transaction.update({

@@ -118,4 +118,22 @@ export const configValidationSchema = Joi.object({
     is: 'production',
     then: Joi.required(),
   }),
+
+  // Stripe Connect
+  STRIPE_CONNECT_WEBHOOK_SECRET: Joi.string().when('ENV', {
+    is: 'production',
+    then: Joi.required(),
+  }),
+  STRIPE_CONNECT_RETURN_URL: Joi.string().uri().when('ENV', {
+    is: 'production',
+    then: Joi.required(),
+  }),
+  STRIPE_CONNECT_REFRESH_URL: Joi.string().uri().when('ENV', {
+    is: 'production',
+    then: Joi.required(),
+  }),
+  STRIPE_CONNECT_FRONTEND_RETURN_URL: Joi.string().uri().when('ENV', {
+    is: 'production',
+    then: Joi.required(),
+  }),
 });

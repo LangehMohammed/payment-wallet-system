@@ -42,6 +42,10 @@ export default () => ({
   stripe: {
     secretKey: process.env.STRIPE_SECRET_KEY,
     webhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+    connectWebhookSecret: process.env.STRIPE_CONNECT_WEBHOOK_SECRET,
+    connectReturnUrl: process.env.STRIPE_CONNECT_RETURN_URL,
+    connectRefreshUrl: process.env.STRIPE_CONNECT_REFRESH_URL,
+    connectFrontendReturnUrl: process.env.STRIPE_CONNECT_FRONTEND_RETURN_URL,
   },
   paypal: {
     clientId: process.env.PAYPAL_CLIENT_ID,

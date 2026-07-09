@@ -5,10 +5,9 @@ import {
 } from '@nestjs/common';
 import { Provider, TransactionStatus, TransactionType } from '@prisma/client';
 import { Prisma } from '@prisma/client';
-import { PrismaService } from '@app/prisma/prisma.service';
 import { AuditLogger } from '@app/common/audit/audit-logger.service';
 import { WalletRepository } from '../wallet/wallet.repository';
-import { PaymentRepository } from './payment.repository';
+import { PaymentRepository, TransactionClient } from './payment.repository';
 import { UsersRepository } from '../user/users.repository';
 import { ProviderResult } from './dto';
 
@@ -40,7 +39,6 @@ export class PaymentSettlementService {
   private readonly logger = new Logger(PaymentSettlementService.name);
 
   constructor(
-    private readonly prisma: PrismaService,
     private readonly walletRepository: WalletRepository,
     private readonly paymentRepository: PaymentRepository,
     private readonly usersRepository: UsersRepository,
@@ -73,7 +71,7 @@ export class PaymentSettlementService {
     outboxEventId: string,
     result: ProviderResult,
   ): Promise<void> {
-    await this.prisma.$transaction(async (tx) => {
+    await this.paymentRepository.withTransaction(async (tx) => {
       if (txCtx.type === TransactionType.DEPOSIT) {
         await this.settleDeposit(txCtx, outboxEventId, result, tx);
       } else if (txCtx.type === TransactionType.WITHDRAWAL) {
@@ -123,7 +121,7 @@ export class PaymentSettlementService {
     outboxEventId: string,
     result: ProviderResult,
   ): Promise<void> {
-    await this.prisma.$transaction(async (tx) => {
+    await this.paymentRepository.withTransaction(async (tx) => {
       if (txCtx.type === TransactionType.DEPOSIT) {
         await this.failDeposit(txCtx, outboxEventId, result, tx);
       } else if (txCtx.type === TransactionType.WITHDRAWAL) {
@@ -155,7 +153,7 @@ export class PaymentSettlementService {
     txCtx: TransactionContext,
     outboxEventId: string,
     result: ProviderResult,
-    tx: Prisma.TransactionClient,
+    tx: TransactionClient,
   ): Promise<void> {
     // Move pending → available
     const availableBalanceAfter = await this.walletRepository.settlePending(
@@ -233,7 +231,7 @@ export class PaymentSettlementService {
     txCtx: TransactionContext,
     outboxEventId: string,
     result: ProviderResult,
-    tx: Prisma.TransactionClient,
+    tx: TransactionClient,
   ): Promise<void> {
     // Debit locked balance — funds have left the system
     const lockedBalanceAfter = await this.walletRepository.settleWithdrawal(
@@ -295,7 +293,7 @@ export class PaymentSettlementService {
     txCtx: TransactionContext,
     outboxEventId: string,
     result: ProviderResult,
-    tx: Prisma.TransactionClient,
+    tx: TransactionClient,
   ): Promise<void> {
     // Reverse the pending credit — funds never arrived
     await tx.wallet.update({
@@ -331,7 +329,7 @@ export class PaymentSettlementService {
     txCtx: TransactionContext,
     outboxEventId: string,
     result: ProviderResult,
-    tx: Prisma.TransactionClient,
+    tx: TransactionClient,
   ): Promise<void> {
     // Restore locked funds back to available — withdrawal did not go through
     await tx.wallet.update({

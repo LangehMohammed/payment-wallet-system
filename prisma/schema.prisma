@@ -58,16 +58,18 @@ enum Provider {
 // ─── Models ───────────────────────────────────────────────────────────────────
 
 model User {
-  id        String        @id @default(uuid())
-  name      String
-  email     String        @unique
-  phone     String        @unique
-  password  String
-  role      Role          @default(USER)
-  status    AccountStatus @default(ACTIVE)
-  braintreeCustomerId String? @unique
-  createdAt DateTime      @default(now())
-  updatedAt DateTime      @updatedAt
+  id                      String        @id @default(uuid())
+  name                    String
+  email                   String        @unique
+  phone                   String        @unique
+  password                String
+  role                    Role          @default(USER)
+  status                  AccountStatus @default(ACTIVE)
+  braintreeCustomerId     String?       @unique
+  stripeConnectAccountId  String?       @unique 
+  paypalEmail             String?       @unique
+  createdAt               DateTime      @default(now())
+  updatedAt               DateTime      @updatedAt
 
   wallet        Wallet?
   refreshTokens RefreshToken[]

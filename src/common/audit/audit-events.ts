@@ -42,11 +42,16 @@ export const AuditEvent = {
   // Idempotency
   IDEMPOTENT_REPLAY: 'IDEMPOTENT_REPLAY',
 
-  // Admin - privilaged mutations on user accounts
+  // Admin - privileged mutations on user accounts
   ADMIN_USER_STATUS_UPDATED: 'ADMIN_USER_STATUS_UPDATED',
 
   // Infrastructure — internal system/control failures
   DENYLIST_FAILURE: 'DENYLIST_FAILURE',
+
+  // Stripe Connect — account lifecycle
+  STRIPE_CONNECT_ACCOUNT_CREATED: 'STRIPE_CONNECT_ACCOUNT_CREATED',
+  STRIPE_CONNECT_ONBOARDING_COMPLETED: 'STRIPE_CONNECT_ONBOARDING_COMPLETED',
+  STRIPE_CONNECT_ACCOUNT_DEAUTHORIZED: 'STRIPE_CONNECT_ACCOUNT_DEAUTHORIZED',
 } as const;
 
 export type AuditEvent = (typeof AuditEvent)[keyof typeof AuditEvent];

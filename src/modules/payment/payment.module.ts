@@ -12,9 +12,11 @@ import { PaypalProvider } from './providers/paypal.provider';
 import { PaymentProviderRegistry } from './providers/registry/payment-provider.registry';
 import { ProviderConfigService } from './providers/config/provider-config.service';
 import { PaypalTokenClient } from './providers/paypal-token.client';
+import { StripeConnectModule } from '../stripe-connect/stripe-connect.module';
+import { TransactionModule } from '../transaction/transaction.module';
 
 @Module({
-  imports: [WalletModule, UsersModule],
+  imports: [WalletModule, UsersModule, StripeConnectModule, TransactionModule],
   controllers: [PaymentController],
   providers: [
     PaymentService,

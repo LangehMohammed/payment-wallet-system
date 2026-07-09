@@ -21,6 +21,7 @@ import { UsersModule } from './modules/user/users.module';
 import { WalletModule } from './modules/wallet/wallet.module';
 import { TransactionModule } from './modules/transaction/transaction.module';
 import { PaymentModule } from './modules/payment/payment.module';
+import { StripeConnectModule } from './modules/stripe-connect/stripe-connect.module';
 
 @Module({
   imports: [
@@ -50,6 +51,7 @@ import { PaymentModule } from './modules/payment/payment.module';
     UsersModule,
     WalletModule,
     TransactionModule,
+    StripeConnectModule,
     PaymentModule,
   ],
   controllers: [AppController],

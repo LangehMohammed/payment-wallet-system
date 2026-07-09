@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import {
   OutboxEvent,
   Prisma,
+  PrismaClient,
   Provider,
   TransactionStatus,
 } from '@prisma/client';
@@ -15,9 +16,25 @@ export interface CreatePaymentLogInput {
   status: TransactionStatus;
 }
 
+export type TransactionClient = Omit<
+  PrismaClient,
+  '$connect' | '$disconnect' | '$on' | '$transaction' | '$use' | '$extends'
+>;
+
 @Injectable()
 export class PaymentRepository {
   constructor(private readonly prisma: PrismaService) {}
+
+  /**
+   * Centralized transaction wrapper
+   */
+  async withTransaction<T>(
+    callback: (tx: TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    return this.prisma.$transaction(async (tx) => {
+      return callback(tx as TransactionClient);
+    });
+  }
 
   // ── Outbox reads ───────────────────────────────────────────────────────────
 
@@ -54,7 +71,7 @@ export class PaymentRepository {
 
   async markDelivered(
     id: string,
-    tx?: Prisma.TransactionClient,
+    tx?: TransactionClient,
   ): Promise<void> {
     const client = tx ?? this.prisma;
     await client.outboxEvent.update({
@@ -80,7 +97,7 @@ export class PaymentRepository {
    */
   async createPaymentLog(
     input: CreatePaymentLogInput,
-    tx: Prisma.TransactionClient,
+    tx: TransactionClient,
   ): Promise<void> {
     await tx.paymentLog.create({
       data: {
@@ -102,7 +119,7 @@ export class PaymentRepository {
   async setProviderRef(
     transactionId: string,
     providerRef: string,
-    tx: Prisma.TransactionClient,
+    tx: TransactionClient,
   ): Promise<void> {
     await tx.transaction.update({
       where: { id: transactionId },
@@ -127,6 +144,17 @@ export class PaymentRepository {
         senderWalletId: true,
         receiverWalletId: true,
       },
+    });
+  }
+
+  /**
+   * Returns the user's paypalEmail only.
+   * Intentionally narrow — this repository owns nothing beyond the Connect field.
+   */
+  async findUserById(id: string): Promise<{ paypalEmail: string } | null> {
+    return this.prisma.user.findUnique({
+      where: { id },
+      select: { paypalEmail: true },
     });
   }
 }
